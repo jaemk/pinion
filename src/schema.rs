@@ -1,0 +1,472 @@
+use crate::models::{Phone, User, BaseUser, VerificationCode};
+use crate::{AppError, Result, CONFIG};
+use async_graphql::{
+    Context, EmptySubscription, ErrorExtensions, FieldResult, Guard, Object, ResultExt,
+};
+use chrono::Utc;
+use sqlx::PgPool;
+
+struct LoginGuard;
+
+impl LoginGuard {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+/// Used to wrap entrypoints that require a logged and verified in user
+#[async_trait::async_trait]
+impl Guard for LoginGuard {
+    async fn check(&self, ctx: &Context<'_>) -> FieldResult<()> {
+        let u = ctx.data_opt::<User>();
+        if u.is_none() {
+            return Err(AppError::Unauthorized("Unauthorized".into()).extend());
+        }
+        let u = u.unwrap();
+        if u.phone_verified.is_none() {
+            return Err(AppError::Unverified("Unverified".into()).extend());
+        }
+        Ok(())
+    }
+}
+
+struct LoginNeedsVerificationGuard;
+
+impl LoginNeedsVerificationGuard {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+/// Used to wrap entrypoints that require a user, but the user might not
+/// yet be verified
+#[async_trait::async_trait]
+impl Guard for LoginNeedsVerificationGuard {
+    async fn check(&self, ctx: &Context<'_>) -> FieldResult<()> {
+        let u = ctx.data_opt::<User>();
+        if u.is_none() {
+            return Err(AppError::Unauthorized("Unauthorized".into()).extend());
+        }
+        // it's ok if the phone isn't verified
+        Ok(())
+    }
+}
+
+fn format_set_cookie(token: &str) -> String {
+    format!(
+        "{name}={token}; Domain={domain}; {secure} HttpOnly; Max-Age={max_age}; SameSite=Lax; Path=/",
+        name = &CONFIG.cookie_name,
+        token = token,
+        domain = &CONFIG.get_real_domain(),
+        secure = if CONFIG.secure_cookie { "Secure;" } else { "" },
+        max_age = &CONFIG.auth_expiration_seconds,
+    )
+}
+
+async fn login_ctx(ctx: &Context<'_>, user: &User) -> Result<()> {
+    let pool = ctx.data_unchecked::<PgPool>();
+    let token = hex::encode(crate::crypto::rand_bytes(32)?);
+    let token_hash = crate::crypto::hmac_sign(&token);
+    let expires = Utc::now()
+        .checked_add_signed(chrono::Duration::seconds(
+            CONFIG.auth_expiration_seconds as i64,
+        ))
+        .ok_or_else(|| AppError::from("error calculating auth expiration"))?;
+    sqlx::query(
+        r##"
+        insert into pin.auth_tokens
+            (user_id, hash, expires) values ($1, $2, $3)
+    "##,
+    )
+        .bind(&user.id)
+        .bind(token_hash)
+        .bind(expires)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("error {:?}", e);
+            AppError::from(e)
+        })?;
+    let cookie_str = format_set_cookie(&token);
+    ctx.insert_http_header("set-cookie", cookie_str);
+    Ok(())
+}
+
+async fn send_verification_code(ctx: &Context<'_>, user: &User) -> Result<String> {
+    let code = crate::crypto::rand_bytes(6).expect("error generating code bytes").iter().map(|n| (n % 10).to_string()).collect::<String>();
+    let salt = crate::crypto::new_pw_salt().expect("error generating salt");
+    let hash = crate::crypto::derive_password_hash(code.as_bytes(), salt.as_ref());
+    let salt = hex::encode(salt);
+    let hash = hex::encode(hash);
+    let pool = ctx.data_unchecked::<PgPool>();
+
+    sqlx::query(
+        r##"
+            insert into pin.verification_codes (user_id, salt, hash)
+                values ($1, $2, $3)
+        "##,
+    )
+        .bind(user.id)
+        .bind(salt)
+        .bind(hash)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("error {:?}", e);
+            AppError::from(e)
+        })?;
+
+    sqlx::query(
+        r##"
+            update pin.phones
+                set modified = now(),
+                verification_sent = now(),
+                verification_attempts = verification_attempts + 1
+            where user_id = $1
+        "##,
+    )
+        .bind(user.id)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("error {:?}", e);
+            AppError::from(e)
+        })?;
+
+    tracing::debug!("verification code: {}", code);
+    Ok(code)
+}
+
+pub struct MutationRoot;
+
+#[Object]
+impl MutationRoot {
+    async fn sign_up(
+        &self,
+        ctx: &Context<'_>,
+        name: String,
+        handle: String,
+        phone_number: String,
+    ) -> FieldResult<User> {
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool.begin().await.map_err(AppError::from)
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let user: Option<BaseUser> = sqlx::query_as(
+            r##"
+            insert into pin.users (name, handle)
+                values ($1, $2)
+            on conflict (handle)
+                where deleted is false
+                do nothing
+            returning *
+            "##
+        ).bind(name)
+            .bind(handle)
+            .fetch_optional(&mut *tr).await.map_err(AppError::from)
+            .extend_err(|e, ex|
+                {
+                    tracing::error!("error {:?}", e);
+                    ex.set("key", "DATABASE_ERROR");
+                })?;
+
+        if user.is_none() {
+            return Err(AppError::BadRequest("bad request".into()).extend().extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_HANDLE")));
+        }
+        let user = user.unwrap();
+
+        // try to clean it up, also truncate the size in case
+        // people are being assholes
+        let phone_number = phone_number.trim().chars().take(20).collect::<String>();
+
+        let phone: Option<Phone> = sqlx::query_as(
+            r##"
+            insert into pin.phones (user_id, number)
+                values ($1, $2)
+            on conflict (number)
+                where deleted is false and verified is not null
+                do nothing
+            returning *
+        "##,
+        )
+            .bind(user.id)
+            .bind(phone_number)
+            .fetch_optional(&mut *tr)
+            .await
+            .map_err(AppError::from)
+            .extend_err(|e, ex| {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "DATABASE_ERROR")
+            })?;
+
+        if phone.is_none() {
+            return Err(AppError::BadRequest("bad request".into()).extend().extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_PHONE")));
+        }
+        let user: User = sqlx::query_as(
+            r##"
+           select u.*, p.number as phone_number, p.verified as phone_verified, p.verification_attempts as phone_verification_attempts from pin.users u
+               inner join pin.phones p on p.user_id = u.id
+           where u.id = $1
+           "##
+        ).bind(user.id)
+            .fetch_one(&mut *tr)
+            .await
+            .map_err(AppError::from)
+            .extend_err(|e, ex| {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "DATABASE_ERROR")
+            })?;
+
+        tr.commit().await.map_err(AppError::from)?;
+
+        // todo: spawn task to send code
+        login_ctx(ctx, &user).await?;
+        Ok(user)
+    }
+
+    // async fn login(&self, ctx: &Context<'_>, email: String, pw: String) -> FieldResult<User> {
+    //     let pool = ctx.data_unchecked::<PgPool>();
+    //     let user: User =
+    //         sqlx::query_as("select * from poop.users where email = $1 and deleted is false")
+    //             .bind(email)
+    //             .fetch_one(pool)
+    //             .await
+    //             .map_err(AppError::from)
+    //             .map_err(|e| {
+    //                 if e.is_db_not_found() {
+    //                     AppError::BadRequest("bad request".into())
+    //                 } else {
+    //                     e
+    //                 }
+    //             })?;
+    //     let user_hash = hex::decode(&user.pw_hash)?;
+    //     let this_hash = crate::crypto::derive_password_hash(
+    //         pw.as_bytes(),
+    //         hex::decode(&user.pw_salt)?.as_ref(),
+    //     );
+    //     if ring::constant_time::verify_slices_are_equal(&user_hash, &this_hash).is_err() {
+    //         return Err(AppError::BadRequest("bad request".into()).extend());
+    //     }
+    //     login_ctx(ctx, &user).await?;
+    //     Ok(user)
+    // }
+
+    async fn logout(&self, ctx: &Context<'_>) -> bool {
+        let token = hex::encode(crate::crypto::rand_bytes(31).unwrap_or_else(|_| vec![0; 31]));
+        let token = format!("xx{token}");
+        let cookie_str = format_set_cookie(&token);
+        ctx.insert_http_header("set-cookie", cookie_str);
+        true
+    }
+
+    #[graphql(guard = "LoginNeedsVerificationGuard::new()")]
+    async fn send_verification_code(
+        &self,
+        ctx: &Context<'_>,
+    ) -> FieldResult<User> {
+        let user = ctx.data_unchecked::<User>();
+        if user.phone_verification_attempts > 10 {
+            return Err(AppError::BadRequest("too many authorization attempts".into()).extend());
+        }
+        send_verification_code(ctx, &user).await?;
+        Ok(user.clone())
+    }
+
+    #[graphql(guard = "LoginNeedsVerificationGuard::new()")]
+    async fn verify_number(
+        &self,
+        ctx: &Context<'_>,
+        code: String,
+    ) -> FieldResult<User> {
+        let user = ctx.data_unchecked::<User>();
+        let pool = ctx.data_unchecked::<PgPool>();
+        let latest_code : Option<VerificationCode> = sqlx::query_as(
+            r##"
+            select * from pin.verification_codes
+            where user_id = $1
+            order by created desc
+            limit 1
+            "##
+        ).bind(user.id)
+            .fetch_optional(pool)
+            .await
+            .map_err(AppError::from)
+            .extend_err(|e, ex| {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "DATABASE_ERROR")
+            })?;
+        if latest_code.is_none() {
+            return Err(AppError::BadRequest("invalid code".into()).extend())
+        }
+        let latest_code = latest_code.unwrap();
+        if latest_code.created < chrono::Utc::now().checked_sub_signed(chrono::Duration::seconds(120)).expect("error calculating 2 minutes ago") {
+            return Err(AppError::BadRequest("invalid code".into()).extend())
+        }
+        let saved_hash = hex::decode(&latest_code.hash)?;
+        let this_hash = crate::crypto::derive_password_hash(
+            code.as_bytes(),
+            hex::decode(&latest_code.salt)?.as_ref(),
+        );
+        if ring::constant_time::verify_slices_are_equal(&saved_hash, &this_hash).is_err() {
+            return Err(AppError::BadRequest("invalid code".into()).extend());
+        }
+
+        sqlx::query(r##"update pin.verification_codes set deleted = true, modified = now() where id = $1"##)
+            .bind(latest_code.id)
+            .execute(pool)
+            .await
+            .map_err(AppError::from)
+            .extend_err(|e, ex| {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "DATABASE_ERROR")
+            })?;
+
+        // Note: This will fail if someone has already verified this number. This is because we
+        //       only enforce unique _verified_ numbers so that someone can't squat your number
+        //       without being able to verify it. The potential downside is that if you legitimately
+        //       enter the wrong (or someone elses) number at signup, then you won't realize until now.
+        //       Need to add another mutation to let you change your phone number (delete and recreate)
+        sqlx::query(r##"update pin.phones set verified = now(), modified = now() where user_id = $1"##)
+            .bind(latest_code.user_id)
+            .execute(pool)
+            .await
+            .map_err(AppError::from)
+            .extend_err(|e, ex| {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "DATABASE_ERROR")
+            })?;
+
+        let user: User = sqlx::query_as(
+            r##"
+           select u.*, p.number as phone_number, p.verified as phone_verified, p.verification_attempts as phone_verification_attempts from pin.users u
+               inner join pin.phones p on p.user_id = u.id
+           where u.id = $1
+           "##
+        ).bind(user.id)
+            .fetch_one(pool)
+            .await
+            .map_err(AppError::from)
+            .extend_err(|e, ex| {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "DATABASE_ERROR")
+            })?;
+
+        Ok(user.clone())
+    }
+
+    // #[graphql(guard = "LoginGuard::new()")]
+    // async fn create_creature(
+    //     &self,
+    //     ctx: &Context<'_>,
+    //     name: String,
+    // ) -> FieldResult<CreatureRelation> {
+    //     let user = ctx.data_unchecked::<User>();
+    //     let pool = ctx.data_unchecked::<PgPool>();
+    //     #[derive(sqlx::FromRow)]
+    //     struct CId {
+    //         id: i64,
+    //     }
+    //
+    //     let mut tr = pool.begin().await?;
+    //     let c_id: CId = sqlx::query_as(
+    //         "insert into poop.creatures (creator_id, name) values ($1, $2) returning id",
+    //     )
+    //     .bind(&user.id)
+    //     .bind(&name)
+    //     .fetch_one(&mut tr)
+    //     .await?;
+    //
+    //     sqlx::query(
+    //         r##"
+    //         insert into poop.creature_access
+    //             (creature_id, user_id, creator_id, kind) values
+    //             ($1, $2, $3, $4)
+    //         "##,
+    //     )
+    //     .bind(&c_id.id)
+    //     .bind(&user.id)
+    //     .bind(&user.id)
+    //     .bind("creator")
+    //     .execute(&mut tr)
+    //     .await?;
+    //
+    //     let c: CreatureRelation = sqlx::query_as(
+    //         r##"
+    //         select c.*, ca.user_id, ca.kind from poop.creatures c
+    //             inner join poop.creature_access ca on ca.creature_id = c.id
+    //         where c.id = $1
+    //             and c.deleted is false
+    //             and ca.deleted is false
+    //         "##,
+    //     )
+    //     .bind(&c_id.id)
+    //     .fetch_one(&mut tr)
+    //     .await?;
+    //     tr.commit().await?;
+    //     Ok(c)
+    // }
+    //
+    // #[graphql(guard = "LoginGuard::new()")]
+    // async fn create_poop(&self, ctx: &Context<'_>, creature_id: String) -> FieldResult<Poop> {
+    //     let user = ctx.data_unchecked::<User>();
+    //     let pool = ctx.data_unchecked::<PgPool>();
+    //
+    //     let creature_id = creature_id.parse::<i64>()?;
+    //
+    //     #[derive(sqlx::FromRow)]
+    //     struct CId {
+    //         id: i64,
+    //     }
+    //
+    //     let mut tr = pool.begin().await?;
+    //     let c_id: Option<CId> = sqlx::query_as(
+    //         r##"
+    //         select ca.creature_id as id from poop.creature_access ca
+    //             where ca.creature_id = $1
+    //                 and ca.user_id = $2
+    //                 and ca.kind in ('creator', 'pooper')
+    //                 and ca.deleted is false
+    //         "##,
+    //     )
+    //     .bind(&creature_id)
+    //     .bind(&user.id)
+    //     .fetch_optional(&mut tr)
+    //     .await?;
+    //
+    //     if let Some(c_id) = c_id {
+    //         let p: Poop = sqlx::query_as(
+    //             r##"
+    //         insert into poop.poops
+    //             (creator_id, creature_id)
+    //             values ($1, $2)
+    //             returning *
+    //         "##,
+    //         )
+    //         .bind(&user.id)
+    //         .bind(&c_id.id)
+    //         .fetch_one(&mut tr)
+    //         .await?;
+    //
+    //         tr.commit().await?;
+    //         Ok(p)
+    //     } else {
+    //         Err(AppError::Unauthorized(format!(
+    //             "user {} doesn't have poop creation clearance for creature {}",
+    //             user.id, creature_id
+    //         ))
+    //         .extend())
+    //     }
+    // }
+}
+
+pub struct QueryRoot;
+
+#[Object]
+impl QueryRoot {
+    #[graphql(guard = "LoginGuard::new()")]
+    async fn user(&self, ctx: &Context<'_>) -> Option<User> {
+        let u = ctx.data_opt::<User>();
+        u.cloned()
+    }
+}
+
+pub type Schema = async_graphql::Schema<QueryRoot, MutationRoot, EmptySubscription>;
