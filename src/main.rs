@@ -75,7 +75,9 @@ async fn run() -> Result<()> {
                     let u: Result<User> = sqlx::query_as(
                         r##"
                         select
-                            u.*, p.number as phone_number, p.verified as phone_verified, p.verification_attempts as phone_verification_attempts
+                            u.*, p.number as phone_number, p.verified as phone_verified,
+                            p.verification_sent as phone_verification_sent,
+                            p.verification_attempts as phone_verification_attempts
                         from pin.users u
                             inner join pin.auth_tokens at on u.id = at.user_id
                             inner join pin.phones p on u.id = p.user_id

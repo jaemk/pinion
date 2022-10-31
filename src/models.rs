@@ -1,7 +1,8 @@
 use crate::loaders::{AppLoader, GroupAssociationsForUserId, UserId};
-use crate::AppError;
+use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object};
 use chrono::{Date, DateTime, Utc};
+use sqlx::PgConnection;
 
 #[derive(Clone, sqlx::FromRow)]
 pub struct BaseUser {
@@ -20,10 +21,66 @@ pub struct User {
     pub handle: String,
     pub phone_number: String,
     pub phone_verified: Option<DateTime<Utc>>,
+    pub phone_verification_sent: Option<DateTime<Utc>>,
     pub phone_verification_attempts: i32,
     pub deleted: bool,
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
+}
+impl User {
+    pub async fn fetch_user(
+        tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        user_id: i64,
+    ) -> Result<User> {
+        let user: User = sqlx::query_as(
+            r##"
+           select
+               u.*,
+               p.number as phone_number,
+               p.verified as phone_verified,
+               p.verification_sent as phone_verification_sent,
+               p.verification_attempts as phone_verification_attempts
+           from pin.users u
+               inner join pin.phones p on p.user_id = u.id
+           where u.id = $1
+               and u.deleted is false
+               and p.deleted is false
+           "##,
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tr)
+        .await
+        .map_err(AppError::from)?;
+        Ok(user)
+    }
+    pub async fn fetch_user_by_handle_number(
+        tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        handle: &str,
+        phone_number: &str,
+    ) -> Result<Option<User>> {
+        let user = sqlx::query_as(
+            r##"
+           select
+               u.*,
+               p.number as phone_number,
+               p.verified as phone_verified,
+               p.verification_sent as phone_verification_sent,
+               p.verification_attempts as phone_verification_attempts
+           from pin.users u
+               inner join pin.phones p on p.user_id = u.id
+           where u.handle = $1
+               and p.number = $2
+               and u.deleted is false
+               and p.deleted is false
+           "##,
+        )
+        .bind(handle)
+        .bind(phone_number)
+        .fetch_optional(&mut *tr)
+        .await
+        .map_err(AppError::from)?;
+        Ok(user)
+    }
 }
 
 #[Object]
@@ -137,7 +194,7 @@ impl Group {
                     "missing expected creating_user_id {} of group {}",
                     self.creating_user_id, self.id
                 ))
-                    .extend()
+                .extend()
             })?
             .into();
         Ok(r)

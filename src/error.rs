@@ -27,6 +27,9 @@ pub enum AppError {
 
     #[error("hex error")]
     Hex(#[from] hex::FromHexError),
+
+    #[error("request error")]
+    Reqwest(#[from] reqwest::Error),
 }
 impl AppError {
     pub fn is_db_not_found(&self) -> bool {
@@ -78,6 +81,7 @@ impl ErrorExtensions for AppError {
                 e.set("error", s.clone());
             }
             AppError::Hex(_) => e.set("code", 500),
+            AppError::Reqwest(_) => e.set("code", 500),
         })
     }
 }
