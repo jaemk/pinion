@@ -19,6 +19,12 @@ pub struct Config {
 
     pub log_level: String,
 
+    pub twilio_account: String,
+    pub twilio_messaging_service_sid: String,
+    pub twilio_sid: String,
+    pub twilio_secret: String,
+    pub default_phone_number: String,
+
     // db config
     pub db_url: String,
     pub db_max_connections: u32,
@@ -49,6 +55,11 @@ impl Config {
             cookie_name: "poop_auth".to_string(),
             secure_cookie: env_or("SECURE_COOKIE", "true") != "false",
             log_level: env_or("LOG_LEVEL", "info"),
+            twilio_account: env_or("TWILIO_ACCOUNT", "X"),
+            twilio_messaging_service_sid: env_or("TWILIO_MESSAGING_SERVICE_SID", "X"),
+            twilio_sid: env_or("TWILIO_SID", "X"),
+            twilio_secret: env_or("TWILIO_SECRET", "X"),
+            default_phone_number: env_or("DEFAULT_PHONE_NUMBER", "0"),
             db_url: env_or("DATABASE_URL", "error"),
             db_max_connections: env_or("DATABASE_MAX_CONNECTIONS", "5")
                 .parse()

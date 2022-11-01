@@ -28,7 +28,9 @@ impl async_graphql::dataloader::Loader<UserId> for PgLoader {
     ) -> std::result::Result<HashMap<UserId, Self::Value>, Self::Error> {
         tracing::info!("loading {} users", keys.len());
         let query = r##"
-            select u.*, p.number as phone_number, p.verified as phone_verified, p.verification_attempts as phone_verification_attempts
+            select u.*, p.number as phone_number, p.verified as phone_verified,
+            p.verification_sent as phone_verification_sent,
+            p.verification_attempts as phone_verification_attempts
             from pin.users u
                 inner join pin.phones p on p.user_id = u.id
             where u.id in (select * from unnest($1))
