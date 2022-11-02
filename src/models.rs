@@ -1,8 +1,7 @@
 use crate::loaders::{AppLoader, GroupAssociationsForUserId, UserId};
 use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object};
-use chrono::{Date, DateTime, Utc};
-use sqlx::PgConnection;
+use chrono::{DateTime, Utc};
 
 #[derive(Clone, sqlx::FromRow)]
 pub struct BaseUser {

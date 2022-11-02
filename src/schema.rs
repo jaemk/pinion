@@ -1,12 +1,11 @@
 use crate::models::{BaseUser, Phone, User, VerificationCode};
 use crate::{AppError, Result, CONFIG};
-use async_graphql::futures_util::TryFutureExt;
 use async_graphql::{
     Context, EmptySubscription, ErrorExtensions, FieldResult, Guard, Object, ResultExt,
 };
 use chrono::Utc;
 use serde::Serialize;
-use sqlx::{Acquire, PgPool};
+use sqlx::{PgPool};
 
 struct LoginGuard;
 
@@ -168,7 +167,7 @@ async fn send_verification_code(ctx: &Context<'_>, user: &User) -> Result<String
         "https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json",
         CONFIG.twilio_account
     );
-    let resp: serde_json::Value = reqwest::Client::new()
+    let _resp: serde_json::Value = reqwest::Client::new()
         .post(&url)
         .basic_auth(&CONFIG.twilio_sid, Some(&CONFIG.twilio_secret))
         .form(&msg)
@@ -202,7 +201,7 @@ async fn _verify_code_for_user(
     }
     let latest_code = latest_code.unwrap();
     if latest_code.created
-        < chrono::Utc::now()
+        < Utc::now()
             .checked_sub_signed(chrono::Duration::seconds(120))
             .expect("error calculating 2 minutes ago")
     {
@@ -297,7 +296,7 @@ impl MutationRoot {
                 where deleted is false and verified is not null
                 do nothing
             returning *
-        "##,
+        "##
         )
         .bind(user.id)
         .bind(phone_number)
@@ -416,109 +415,7 @@ impl MutationRoot {
         Ok(user)
     }
 
-    // #[graphql(guard = "LoginGuard::new()")]
-    // async fn create_creature(
-    //     &self,
-    //     ctx: &Context<'_>,
-    //     name: String,
-    // ) -> FieldResult<CreatureRelation> {
-    //     let user = ctx.data_unchecked::<User>();
-    //     let pool = ctx.data_unchecked::<PgPool>();
-    //     #[derive(sqlx::FromRow)]
-    //     struct CId {
-    //         id: i64,
-    //     }
-    //
-    //     let mut tr = pool.begin().await?;
-    //     let c_id: CId = sqlx::query_as(
-    //         "insert into poop.creatures (creator_id, name) values ($1, $2) returning id",
-    //     )
-    //     .bind(&user.id)
-    //     .bind(&name)
-    //     .fetch_one(&mut tr)
-    //     .await?;
-    //
-    //     sqlx::query(
-    //         r##"
-    //         insert into poop.creature_access
-    //             (creature_id, user_id, creator_id, kind) values
-    //             ($1, $2, $3, $4)
-    //         "##,
-    //     )
-    //     .bind(&c_id.id)
-    //     .bind(&user.id)
-    //     .bind(&user.id)
-    //     .bind("creator")
-    //     .execute(&mut tr)
-    //     .await?;
-    //
-    //     let c: CreatureRelation = sqlx::query_as(
-    //         r##"
-    //         select c.*, ca.user_id, ca.kind from poop.creatures c
-    //             inner join poop.creature_access ca on ca.creature_id = c.id
-    //         where c.id = $1
-    //             and c.deleted is false
-    //             and ca.deleted is false
-    //         "##,
-    //     )
-    //     .bind(&c_id.id)
-    //     .fetch_one(&mut tr)
-    //     .await?;
-    //     tr.commit().await?;
-    //     Ok(c)
-    // }
-    //
-    // #[graphql(guard = "LoginGuard::new()")]
-    // async fn create_poop(&self, ctx: &Context<'_>, creature_id: String) -> FieldResult<Poop> {
-    //     let user = ctx.data_unchecked::<User>();
-    //     let pool = ctx.data_unchecked::<PgPool>();
-    //
-    //     let creature_id = creature_id.parse::<i64>()?;
-    //
-    //     #[derive(sqlx::FromRow)]
-    //     struct CId {
-    //         id: i64,
-    //     }
-    //
-    //     let mut tr = pool.begin().await?;
-    //     let c_id: Option<CId> = sqlx::query_as(
-    //         r##"
-    //         select ca.creature_id as id from poop.creature_access ca
-    //             where ca.creature_id = $1
-    //                 and ca.user_id = $2
-    //                 and ca.kind in ('creator', 'pooper')
-    //                 and ca.deleted is false
-    //         "##,
-    //     )
-    //     .bind(&creature_id)
-    //     .bind(&user.id)
-    //     .fetch_optional(&mut tr)
-    //     .await?;
-    //
-    //     if let Some(c_id) = c_id {
-    //         let p: Poop = sqlx::query_as(
-    //             r##"
-    //         insert into poop.poops
-    //             (creator_id, creature_id)
-    //             values ($1, $2)
-    //             returning *
-    //         "##,
-    //         )
-    //         .bind(&user.id)
-    //         .bind(&c_id.id)
-    //         .fetch_one(&mut tr)
-    //         .await?;
-    //
-    //         tr.commit().await?;
-    //         Ok(p)
-    //     } else {
-    //         Err(AppError::Unauthorized(format!(
-    //             "user {} doesn't have poop creation clearance for creature {}",
-    //             user.id, creature_id
-    //         ))
-    //         .extend())
-    //     }
-    // }
+
 }
 
 pub struct QueryRoot;

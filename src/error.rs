@@ -31,11 +31,6 @@ pub enum AppError {
     #[error("request error")]
     Reqwest(#[from] reqwest::Error),
 }
-impl AppError {
-    pub fn is_db_not_found(&self) -> bool {
-        matches!(*self, Self::DBNotFound(_))
-    }
-}
 impl From<&str> for AppError {
     fn from(s: &str) -> AppError {
         AppError::E(s.to_string())
