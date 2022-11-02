@@ -5,7 +5,7 @@ use async_graphql::{
 };
 use chrono::Utc;
 use serde::Serialize;
-use sqlx::{PgPool};
+use sqlx::PgPool;
 
 struct LoginGuard;
 
@@ -294,16 +294,16 @@ impl MutationRoot {
             where number = $1
                 and deleted is false
                 and verified is not null
-        "##
+        "##,
         )
-            .bind(&phone_number)
-            .fetch_optional(&mut *tr)
-            .await
-            .map_err(AppError::from)
-            .extend_err(|e, ex| {
-                tracing::error!("error {:?}", e);
-                ex.set("key", "DATABASE_ERROR")
-            })?;
+        .bind(&phone_number)
+        .fetch_optional(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|e, ex| {
+            tracing::error!("error {:?}", e);
+            ex.set("key", "DATABASE_ERROR")
+        })?;
         if existing_phone.is_some() {
             return Err(AppError::BadRequest("bad request".into())
                 .extend()
@@ -318,7 +318,7 @@ impl MutationRoot {
                 where deleted is false and verified is not null
                 do nothing
             returning *
-        "##
+        "##,
         )
         .bind(user.id)
         .bind(phone_number)
@@ -437,7 +437,55 @@ impl MutationRoot {
         Ok(user)
     }
 
+    #[graphql(guard = "LoginNeedsVerificationGuard::new()")]
+    async fn delete_account(&self, ctx: &Context<'_>, code: String) -> FieldResult<bool> {
+        let user = ctx.data_unchecked::<User>();
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool.begin().await.map_err(AppError::from).extend()?;
+        let user = _verify_code_for_user(&mut tr, user, &code)
+            .await
+            .extend_err(|e, ex| {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "INVALID_CODE")
+            })?;
+        tr.commit().await.map_err(AppError::from).extend()?;
 
+        let mut tr = pool.begin().await.map_err(AppError::from).extend()?;
+        sqlx::query(
+            r##"
+            update pin.phones
+                set modified = now(),
+                deleted = true
+            where user_id = $1
+        "##,
+        )
+        .bind(user.id)
+        .execute(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|e, ex| {
+            tracing::error!("error {:?}", e);
+            ex.set("key", "DATABASE_ERROR")
+        })?;
+        sqlx::query(
+            r##"
+            update pin.users
+                set modified = now(),
+                deleted = true
+            where id = $1
+        "##,
+        )
+        .bind(user.id)
+        .execute(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|e, ex| {
+            tracing::error!("error {:?}", e);
+            ex.set("key", "DATABASE_ERROR")
+        })?;
+        tr.commit().await.map_err(AppError::from).extend()?;
+        self.logout(ctx).await
+    }
 }
 
 pub struct QueryRoot;
