@@ -288,6 +288,28 @@ impl MutationRoot {
         // people are being assholes
         let phone_number = phone_number.trim().chars().take(20).collect::<String>();
 
+        let existing_phone: Option<Phone> = sqlx::query_as(
+            r##"
+            select * from pin.phones
+            where number = $1
+                and deleted is false
+                and verified is not null
+        "##
+        )
+            .bind(&phone_number)
+            .fetch_optional(&mut *tr)
+            .await
+            .map_err(AppError::from)
+            .extend_err(|e, ex| {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "DATABASE_ERROR")
+            })?;
+        if existing_phone.is_some() {
+            return Err(AppError::BadRequest("bad request".into())
+                .extend()
+                .extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_PHONE")));
+        }
+
         let phone: Option<Phone> = sqlx::query_as(
             r##"
             insert into pin.phones (user_id, number)
