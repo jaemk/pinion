@@ -1,4 +1,12 @@
-> track that poop
+> what's your pinion
+
+### requirements
+
+```shell
+postgres # https://postgresapp.com/
+rust     # https://rustup.rs/
+migrant  # cargo install migrant --features postgres
+```
 
 ### setup
 
@@ -14,10 +22,4 @@ migrant apply -a
 
 ```shell
 cargo run
-```
-
-### build
-
-```shell
-./docker.sh build
 ```
