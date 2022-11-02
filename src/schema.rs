@@ -237,7 +237,7 @@ async fn _verify_code_for_user(
 
     let user = User::fetch_user(tr, user.id).await?;
 
-    Ok(user.clone())
+    Ok(user)
 }
 
 pub struct MutationRoot;
@@ -418,7 +418,7 @@ impl MutationRoot {
     #[graphql(guard = "LoginNeedsVerificationGuard::new()")]
     async fn send_verification_code(&self, ctx: &Context<'_>) -> FieldResult<User> {
         let user = ctx.data_unchecked::<User>();
-        send_verification_code(ctx, &user).await.extend()?;
+        send_verification_code(ctx, user).await.extend()?;
         Ok(user.clone())
     }
 
@@ -484,7 +484,8 @@ impl MutationRoot {
             ex.set("key", "DATABASE_ERROR")
         })?;
         tr.commit().await.map_err(AppError::from).extend()?;
-        self.logout(ctx).await
+        let r = self.logout(ctx).await?;
+        Ok(r)
     }
 }
 

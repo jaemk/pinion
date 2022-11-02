@@ -99,7 +99,7 @@ impl User {
             .data_unchecked::<AppLoader>()
             .load_one(GroupAssociationsForUserId(self.id))
             .await?
-            .unwrap_or_else(Vec::new);
+            .unwrap_or_default();
         Ok(r)
     }
     async fn created(&self) -> DateTime<Utc> {
@@ -115,7 +115,7 @@ pub struct SimpleUser {
     pub id: i64,
     pub handle: String,
 }
-impl std::convert::From<User> for SimpleUser {
+impl From<User> for SimpleUser {
     fn from(u: User) -> Self {
         Self {
             id: u.id,
