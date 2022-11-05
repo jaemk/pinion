@@ -1,20 +1,13 @@
-name: pipeline
+name: check
 on:
-  push:
-    branches:
-      - 'master'
   pull_request:
     branches: [ master ]
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-env:
-  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
 jobs:
   check:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref != 'refs/heads/master'
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE
       - uses: actions/checkout@v2
@@ -36,13 +29,3 @@ jobs:
 
       - name: lint test
         run: cargo fmt -- --check && cargo clippy -- --no-deps && cargo test
-
-  deploy:
-      name: deploy
-      runs-on: ubuntu-latest
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-      steps:
-        - uses: actions/checkout@v2
-        - uses: superfly/flyctl-actions/setup-flyctl@master
-        - run: flyctl deploy
-
