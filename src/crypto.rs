@@ -42,7 +42,7 @@ pub fn hmac_sign_with_key(s: &str, key: &str) -> String {
     // using a 32 byte key
     let s_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key.as_bytes());
     let tag = ring::hmac::sign(&s_key, s.as_bytes());
-    hex::encode(&tag)
+    hex::encode(tag)
 }
 
 pub fn hmac_verify(text: &str, sig: &str) -> bool {

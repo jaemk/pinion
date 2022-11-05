@@ -79,7 +79,7 @@ async fn login_ctx(ctx: &Context<'_>, user: &User) -> Result<()> {
             (user_id, hash, expires) values ($1, $2, $3)
     "##,
     )
-    .bind(&user.id)
+    .bind(user.id)
     .bind(token_hash)
     .bind(expires)
     .execute(pool)
