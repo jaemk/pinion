@@ -35,7 +35,7 @@ async fn run() -> Result<()> {
     let addr = CONFIG.get_host_port();
     let filter = tracing_subscriber::filter::EnvFilter::new(&CONFIG.log_level);
     tracing_subscriber::fmt().with_env_filter(filter).init();
-    let pool = sqlx::PgPool::connect(&CONFIG.db_url).await?;
+    let pool = sqlx::PgPool::connect(&CONFIG.database_url).await?;
 
     let status = warp::path("status").and(warp::get()).map(move || {
         #[derive(serde::Serialize)]

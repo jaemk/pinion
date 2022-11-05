@@ -1,0 +1,52 @@
+# fly.toml file generated for kom-pinion on 2022-11-05T17:27:01-04:00
+
+app = "kom-pinion"
+kill_signal = "SIGINT"
+kill_timeout = 5
+processes = []
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "3000"
+  LOG_JSON = "true"
+  LOG_LEVEL = "pinion=info,tracing=info,warp=info"
+  DATABASE_NAME = "pinion"
+  DATABASE_USER = "pinion"
+  DATABASE_PORT = "5432"
+  DATABASE_HOST = "kom-pg.internal"
+  REAL_HOSTNAME = "https://api.getpinion.com"
+  REAL_DOMAIN = "getpinion.com"
+  SQLX_OFFLINE = "true"
+  SECURE_COOKIE = "true"
+
+[experimental]
+  allowed_public_ports = []
+  auto_rollback = true
+
+[[services]]
+  internal_port = 3000
+  processes = ["app"]
+  protocol = "tcp"
+  script_checks = []
+  [services.concurrency]
+    hard_limit = 100
+    soft_limit = 20
+    type = "connections"
+
+  [[services.http_checks]]
+    grace_period = "5s"
+    interval = "60s"
+    method = "get"
+    path = "/status"
+    protocol = "http"
+    restart_limit = 0
+    timeout = "2s"
+
+  [[services.ports]]
+    force_https = true
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443

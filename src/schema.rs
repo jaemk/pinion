@@ -167,14 +167,23 @@ async fn send_verification_code(ctx: &Context<'_>, user: &User) -> Result<String
         "https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json",
         CONFIG.twilio_account
     );
-    let _resp: serde_json::Value = reqwest::Client::new()
-        .post(&url)
-        .basic_auth(&CONFIG.twilio_sid, Some(&CONFIG.twilio_secret))
-        .form(&msg)
-        .send()
-        .await?
-        .json()
-        .await?;
+    if CONFIG.allowed_phone_numbers.is_none()
+        || (CONFIG.allowed_phone_numbers.is_some()
+            && CONFIG
+                .allowed_phone_numbers
+                .as_ref()
+                .unwrap()
+                .contains(&user.phone_number))
+    {
+        let _resp: serde_json::Value = reqwest::Client::new()
+            .post(&url)
+            .basic_auth(&CONFIG.twilio_sid, Some(&CONFIG.twilio_secret))
+            .form(&msg)
+            .send()
+            .await?
+            .json()
+            .await?;
+    }
     tracing::debug!("verification code: {}", code);
     Ok(code)
 }
