@@ -10,7 +10,6 @@ on:
 
 env:
   FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-  DEPLOY: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
 jobs:
   build:
@@ -41,9 +40,9 @@ jobs:
   deploy:
       name: deploy
       runs-on: ubuntu-latest
+      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
       steps:
         - uses: actions/checkout@v2
         - uses: superfly/flyctl-actions/setup-flyctl@master
-        - if: ${{ env.DEPLOY }}
-          run: flyctl deploy
+        - run: flyctl deploy
 
