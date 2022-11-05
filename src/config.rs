@@ -1,3 +1,4 @@
+use std::env;
 use std::io::Read;
 fn env_or(k: &str, default: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| default.to_string())
@@ -24,9 +25,10 @@ pub struct Config {
     pub twilio_sid: String,
     pub twilio_secret: String,
     pub default_phone_number: String,
+    pub allowed_phone_numbers: Option<Vec<String>>,
 
     // db config
-    pub db_url: String,
+    pub database_url: String,
     pub db_max_connections: u32,
 
     // key used for encrypting things
@@ -46,6 +48,13 @@ impl Config {
                 s.trim().to_string()
             })
             .unwrap_or_else(|_| "unknown".to_string());
+
+        let allowed_phone_numbers = env::var("ALLOWED_PHONE_NUMBERS").ok().map(|s| {
+            s.trim()
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .collect::<Vec<_>>()
+        });
         Self {
             version,
             host: env_or("HOST", "localhost"),
@@ -60,7 +69,8 @@ impl Config {
             twilio_sid: env_or("TWILIO_SID", "X"),
             twilio_secret: env_or("TWILIO_SECRET", "X"),
             default_phone_number: env_or("DEFAULT_PHONE_NUMBER", "0"),
-            db_url: env_or("DATABASE_URL", "error"),
+            allowed_phone_numbers,
+            database_url: env_or("DATABASE_URL", "error"),
             db_max_connections: env_or("DATABASE_MAX_CONNECTIONS", "5")
                 .parse()
                 .expect("invalid DATABASE_MAX_CONNECTIONS"),
