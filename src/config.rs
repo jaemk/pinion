@@ -19,6 +19,7 @@ pub struct Config {
     pub secure_cookie: bool, // only set to false for local dev
 
     pub log_level: String,
+    pub log_json: bool,
 
     pub twilio_account: String,
     pub twilio_messaging_service_sid: String,
@@ -64,6 +65,7 @@ impl Config {
             cookie_name: "poop_auth".to_string(),
             secure_cookie: env_or("SECURE_COOKIE", "true") != "false",
             log_level: env_or("LOG_LEVEL", "info"),
+            log_json: env_or("LOG_JSON", "false") == "true",
             twilio_account: env_or("TWILIO_ACCOUNT", "X"),
             twilio_messaging_service_sid: env_or("TWILIO_MESSAGING_SERVICE_SID", "X"),
             twilio_sid: env_or("TWILIO_SID", "X"),

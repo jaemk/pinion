@@ -34,7 +34,16 @@ async fn run() -> Result<()> {
 
     let addr = CONFIG.get_host_port();
     let filter = tracing_subscriber::filter::EnvFilter::new(&CONFIG.log_level);
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    if CONFIG.log_json {
+        tracing_subscriber::fmt()
+            .json()
+            .with_current_span(false)
+            .with_env_filter(filter)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
+
     let pool = sqlx::PgPool::connect(&CONFIG.database_url).await?;
 
     let status = warp::path("status").and(warp::get()).map(move || {

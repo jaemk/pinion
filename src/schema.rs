@@ -175,14 +175,23 @@ async fn send_verification_code(ctx: &Context<'_>, user: &User) -> Result<String
                 .unwrap()
                 .contains(&user.phone_number))
     {
+        tracing::info!("sending code to {}", &user.phone_number);
         let _resp: serde_json::Value = reqwest::Client::new()
             .post(&url)
             .basic_auth(&CONFIG.twilio_sid, Some(&CONFIG.twilio_secret))
             .form(&msg)
             .send()
-            .await?
+            .await
+            .map_err(|e| {
+                tracing::error!("{:?}", e);
+                e
+            })?
             .json()
-            .await?;
+            .await
+            .map_err(|e| {
+                tracing::error!("{:?}", e);
+                e
+            })?;
     }
     tracing::debug!("verification code: {}", code);
     Ok(code)
