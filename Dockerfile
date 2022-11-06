@@ -41,6 +41,7 @@ COPY ./migrations ./migrations
 
 # copy out the binary, static assets, and commit_hash
 FROM debian:bullseye-slim
+RUN apt-get update && apt-get install --yes ca-certificates
 WORKDIR /app/pinion
 COPY --from=builder /usr/local/cargo/bin/migrant /usr/bin/migrant
 COPY --from=builder /app/pinion/commit_hash.txt ./commit_hash.txt
