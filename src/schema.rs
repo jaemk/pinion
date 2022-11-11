@@ -94,11 +94,33 @@ async fn login_ctx(ctx: &Context<'_>, user: &User) -> Result<()> {
 }
 
 async fn send_verification_code(ctx: &Context<'_>, user: &User) -> Result<String> {
+    let pool = ctx.data_unchecked::<PgPool>();
+
+    #[derive(Clone, sqlx::FromRow)]
+    struct Count {
+        last_minute_count: i64,
+    }
+    let c: Count = sqlx::query_as(
+        r##"
+        select count(*) as last_minute_count
+        from pin.verification_codes
+        where user_id = $1
+            and created > now() - interval '60 seconds'
+        "##,
+    )
+    .bind(user.id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("error {:?}", e);
+        AppError::from(e)
+    })?;
     if let Some(sent) = user.phone_verification_sent {
         if sent
             > Utc::now()
-                .checked_sub_signed(chrono::Duration::seconds(60))
-                .expect("error calculating 2 minutes ago")
+                .checked_sub_signed(chrono::Duration::seconds(5))
+                .expect("error calculating 5 seconds ago")
+            || c.last_minute_count > 5
         {
             return Err(AppError::BadRequest(
                 "too many authorization attempts".into(),
@@ -265,9 +287,9 @@ impl MutationRoot {
     async fn sign_up(
         &self,
         ctx: &Context<'_>,
-        name: String,
         handle: String,
         phone_number: String,
+        name: Option<String>,
     ) -> FieldResult<User> {
         let pool = ctx.data_unchecked::<PgPool>();
         let mut tr = pool
@@ -277,15 +299,14 @@ impl MutationRoot {
             .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
         let user: Option<BaseUser> = sqlx::query_as(
             r##"
-            insert into pin.users (name, handle)
-                values ($1, $2)
+            insert into pin.users (handle)
+                values ($1)
             on conflict (handle)
                 where deleted is false
                 do nothing
             returning *
             "##,
         )
-        .bind(name)
         .bind(handle)
         .fetch_optional(&mut *tr)
         .await
@@ -301,6 +322,24 @@ impl MutationRoot {
                 .extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_HANDLE")));
         }
         let user = user.unwrap();
+
+        if let Some(name) = name {
+            sqlx::query(
+                r##"
+                insert into pin.profiles (user_id, name)
+                    values ($1, $2)
+                "##,
+            )
+            .bind(user.id)
+            .bind(name)
+            .execute(&mut *tr)
+            .await
+            .map_err(AppError::from)
+            .extend_err(|e, ex| {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "DATABASE_ERROR");
+            })?;
+        }
 
         // try to clean it up, also truncate the size in case
         // people are being assholes
@@ -369,7 +408,6 @@ impl MutationRoot {
     async fn login_phone_confirm(
         &self,
         ctx: &Context<'_>,
-        handle: String,
         phone_number: String,
         code: String,
     ) -> FieldResult<User> {
@@ -380,7 +418,7 @@ impl MutationRoot {
             .map_err(AppError::from)
             .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
 
-        let user = User::fetch_user_by_handle_number(&mut tr, &handle, &phone_number)
+        let user = User::fetch_user_by_number(&mut tr, &phone_number)
             .await
             .extend_err(|e, ex| {
                 tracing::error!("error {:?}", e);
@@ -404,15 +442,10 @@ impl MutationRoot {
         Ok(user)
     }
 
-    async fn login_phone(
-        &self,
-        ctx: &Context<'_>,
-        handle: String,
-        phone_number: String,
-    ) -> FieldResult<bool> {
+    async fn login_phone(&self, ctx: &Context<'_>, phone_number: String) -> FieldResult<bool> {
         let pool = ctx.data_unchecked::<PgPool>();
         let mut tr = pool.begin().await?;
-        let user = User::fetch_user_by_handle_number(&mut tr, &handle, &phone_number)
+        let user = User::fetch_user_by_number(&mut tr, &phone_number)
             .await
             .extend_err(|e, ex| {
                 tracing::error!("error {:?}", e);

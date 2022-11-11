@@ -3,7 +3,6 @@ begin;
 create table pin.users
 (
     id       bigint primary key   default pin.id_gen(),
-    name     text        not null,
     handle   text not null,
     deleted  boolean     not null default false,
     created  timestamptz not null default now(),
