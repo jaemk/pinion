@@ -86,20 +86,28 @@ async fn run() -> Result<()> {
                         select
                             u.*, p.number as phone_number, p.verified as phone_verified,
                             p.verification_sent as phone_verification_sent,
-                            p.verification_attempts as phone_verification_attempts
+                            p.verification_attempts as phone_verification_attempts,
+                            pr.name
                         from pin.users u
                             inner join pin.auth_tokens at on u.id = at.user_id
                             inner join pin.phones p on u.id = p.user_id
+                            left outer join pin.profiles pr on u.id = pr.user_id
                         where at.hash = $1
                             and at.deleted is false
                             and at.expires > now()
-                            and u.deleted is false"##,
+                            and u.deleted is false
+                            and (pr.deleted is false or pr.deleted is null)
+                            "##,
                     )
                     .bind(hash)
                     .fetch_one(&pool)
                     .await
                     .map_err(|e| {
-                        tracing::error!("error {:?}", e);
+                        if matches!(e, sqlx::Error::RowNotFound) {
+                            tracing::info!("no user logged in");
+                        } else {
+                            tracing::error!("error {:?}", e);
+                        }
                         AppError::from(e)
                     });
                     if let Ok(u) = u {

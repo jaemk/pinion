@@ -6,8 +6,6 @@ use chrono::{DateTime, Utc};
 #[derive(Clone, sqlx::FromRow)]
 pub struct BaseUser {
     pub id: i64,
-    pub name: String,
-    pub handle: String,
     pub deleted: bool,
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
@@ -16,7 +14,7 @@ pub struct BaseUser {
 #[derive(Clone, sqlx::FromRow)]
 pub struct User {
     pub id: i64,
-    pub name: String,
+    pub name: Option<String>,
     pub handle: String,
     pub phone_number: String,
     pub phone_verified: Option<DateTime<Utc>>,
@@ -38,12 +36,15 @@ impl User {
                p.number as phone_number,
                p.verified as phone_verified,
                p.verification_sent as phone_verification_sent,
-               p.verification_attempts as phone_verification_attempts
+               p.verification_attempts as phone_verification_attempts,
+               pr.name as name
            from pin.users u
                inner join pin.phones p on p.user_id = u.id
+               left outer join pin.profiles pr on pr.user_id = u.id
            where u.id = $1
                and u.deleted is false
                and p.deleted is false
+               and (pr.deleted is false or pr.deleted is null)
            "##,
         )
         .bind(user_id)
@@ -52,9 +53,8 @@ impl User {
         .map_err(AppError::from)?;
         Ok(user)
     }
-    pub async fn fetch_user_by_handle_number(
+    pub async fn fetch_user_by_number(
         tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        handle: &str,
         phone_number: &str,
     ) -> Result<Option<User>> {
         let user = sqlx::query_as(
@@ -64,16 +64,17 @@ impl User {
                p.number as phone_number,
                p.verified as phone_verified,
                p.verification_sent as phone_verification_sent,
-               p.verification_attempts as phone_verification_attempts
+               p.verification_attempts as phone_verification_attempts,
+               pr.name as name
            from pin.users u
                inner join pin.phones p on p.user_id = u.id
-           where u.handle = $1
-               and p.number = $2
+               left outer join pin.profiles pr on pr.user_id = u.id
+           where p.number = $1
                and u.deleted is false
                and p.deleted is false
+               and (pr.deleted is false or pr.deleted is null)
            "##,
         )
-        .bind(handle)
         .bind(phone_number)
         .fetch_optional(&mut *tr)
         .await
@@ -87,8 +88,8 @@ impl User {
     async fn id(&self) -> String {
         self.id.to_string()
     }
-    async fn name(&self) -> &str {
-        &self.name
+    async fn name(&self) -> Option<&String> {
+        self.name.as_ref()
     }
 
     async fn handle(&self) -> &str {
