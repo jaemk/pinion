@@ -280,6 +280,117 @@ async fn _verify_code_for_user(
     Ok(user)
 }
 
+async fn create_user(
+    tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    handle: String,
+    phone_number: String,
+    name: Option<String>,
+) -> FieldResult<User> {
+    let user: Option<BaseUser> = sqlx::query_as(
+        r##"
+            insert into pin.users (handle)
+                values ($1)
+            on conflict (handle)
+                where deleted is false
+                do nothing
+            returning *
+            "##,
+    )
+    .bind(handle)
+    .fetch_optional(&mut *tr)
+    .await
+    .map_err(AppError::from)
+    .extend_err(|e, ex| {
+        tracing::error!("error {:?}", e);
+        ex.set("key", "DATABASE_ERROR");
+    })?;
+
+    if user.is_none() {
+        return Err(AppError::BadRequest("bad request".into())
+            .extend()
+            .extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_HANDLE")));
+    }
+    let user = user.unwrap();
+
+    if let Some(name) = name {
+        sqlx::query(
+            r##"
+                insert into pin.profiles (user_id, name)
+                    values ($1, $2)
+                "##,
+        )
+        .bind(user.id)
+        .bind(name)
+        .execute(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|e, ex| {
+            tracing::error!("error {:?}", e);
+            ex.set("key", "DATABASE_ERROR");
+        })?;
+    }
+
+    // try to clean it up, also truncate the size in case
+    // people are being assholes
+    let phone_number = phone_number.trim().chars().take(20).collect::<String>();
+
+    let existing_phone: Option<Phone> = sqlx::query_as(
+        r##"
+            select * from pin.phones
+            where number = $1
+                and deleted is false
+                and verified is not null
+        "##,
+    )
+    .bind(&phone_number)
+    .fetch_optional(&mut *tr)
+    .await
+    .map_err(AppError::from)
+    .extend_err(|e, ex| {
+        tracing::error!("error {:?}", e);
+        ex.set("key", "DATABASE_ERROR")
+    })?;
+    if existing_phone.is_some() {
+        return Err(AppError::BadRequest("bad request".into())
+            .extend()
+            .extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_PHONE")));
+    }
+
+    let phone: Option<Phone> = sqlx::query_as(
+        r##"
+            insert into pin.phones (user_id, number)
+                values ($1, $2)
+            on conflict (number)
+                where deleted is false and verified is not null
+                do nothing
+            returning *
+        "##,
+    )
+    .bind(user.id)
+    .bind(phone_number)
+    .fetch_optional(&mut *tr)
+    .await
+    .map_err(AppError::from)
+    .extend_err(|e, ex| {
+        tracing::error!("error {:?}", e);
+        ex.set("key", "DATABASE_ERROR")
+    })?;
+
+    if phone.is_none() {
+        return Err(AppError::BadRequest("bad request".into())
+            .extend()
+            .extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_PHONE")));
+    }
+    let user = User::fetch_user(&mut *tr, user.id)
+        .await
+        .extend_err(|e, ex| {
+            tracing::error!("error {:?}", e);
+            ex.set("key", "DATABASE_ERROR")
+        })?;
+
+    Ok(user)
+}
+
 pub struct MutationRoot;
 
 #[Object]
@@ -297,111 +408,53 @@ impl MutationRoot {
             .await
             .map_err(AppError::from)
             .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
-        let user: Option<BaseUser> = sqlx::query_as(
-            r##"
-            insert into pin.users (handle)
-                values ($1)
-            on conflict (handle)
-                where deleted is false
-                do nothing
-            returning *
-            "##,
-        )
-        .bind(handle)
-        .fetch_optional(&mut *tr)
-        .await
-        .map_err(AppError::from)
-        .extend_err(|e, ex| {
-            tracing::error!("error {:?}", e);
-            ex.set("key", "DATABASE_ERROR");
-        })?;
 
-        if user.is_none() {
-            return Err(AppError::BadRequest("bad request".into())
-                .extend()
-                .extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_HANDLE")));
-        }
-        let user = user.unwrap();
-
-        if let Some(name) = name {
-            sqlx::query(
-                r##"
-                insert into pin.profiles (user_id, name)
-                    values ($1, $2)
-                "##,
-            )
-            .bind(user.id)
-            .bind(name)
-            .execute(&mut *tr)
-            .await
-            .map_err(AppError::from)
-            .extend_err(|e, ex| {
-                tracing::error!("error {:?}", e);
-                ex.set("key", "DATABASE_ERROR");
-            })?;
-        }
-
-        // try to clean it up, also truncate the size in case
-        // people are being assholes
-        let phone_number = phone_number.trim().chars().take(20).collect::<String>();
-
-        let existing_phone: Option<Phone> = sqlx::query_as(
-            r##"
-            select * from pin.phones
-            where number = $1
-                and deleted is false
-                and verified is not null
-        "##,
-        )
-        .bind(&phone_number)
-        .fetch_optional(&mut *tr)
-        .await
-        .map_err(AppError::from)
-        .extend_err(|e, ex| {
-            tracing::error!("error {:?}", e);
-            ex.set("key", "DATABASE_ERROR")
-        })?;
-        if existing_phone.is_some() {
-            return Err(AppError::BadRequest("bad request".into())
-                .extend()
-                .extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_PHONE")));
-        }
-
-        let phone: Option<Phone> = sqlx::query_as(
-            r##"
-            insert into pin.phones (user_id, number)
-                values ($1, $2)
-            on conflict (number)
-                where deleted is false and verified is not null
-                do nothing
-            returning *
-        "##,
-        )
-        .bind(user.id)
-        .bind(phone_number)
-        .fetch_optional(&mut *tr)
-        .await
-        .map_err(AppError::from)
-        .extend_err(|e, ex| {
-            tracing::error!("error {:?}", e);
-            ex.set("key", "DATABASE_ERROR")
-        })?;
-
-        if phone.is_none() {
-            return Err(AppError::BadRequest("bad request".into())
-                .extend()
-                .extend_with(|_e, ex| ex.set("key", "UNAVAILABLE_PHONE")));
-        }
-        let user = User::fetch_user(&mut tr, user.id)
-            .await
-            .extend_err(|e, ex| {
-                tracing::error!("error {:?}", e);
-                ex.set("key", "DATABASE_ERROR")
-            })?;
-
+        let user = create_user(&mut tr, handle, phone_number, name).await?;
         tr.commit().await.map_err(AppError::from).extend()?;
         send_verification_code(ctx, &user).await.extend()?;
         login_ctx(ctx, &user).await.extend()?;
+        Ok(user)
+    }
+
+    #[graphql(guard = "LoginGuard::new()")]
+    async fn set_handle(&self, ctx: &Context<'_>, handle: String) -> FieldResult<User> {
+        let user = ctx.data_unchecked::<User>();
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool.begin().await?;
+
+        let user: Option<BaseUser> = sqlx::query_as(
+            r##"
+            update pin.users
+                set handle = $1
+                where id = $2
+                    and deleted is false
+                returning *
+            "##,
+        )
+        .bind(&handle)
+        .bind(user.id)
+        .fetch_optional(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|e, ex| {
+            if let Some((_code, _constraint)) = e.unique_constraint_error() {
+                tracing::info!("handle {} is unavailable", &handle);
+                ex.set("key", "UNAVAILABLE_HANDLE")
+            } else {
+                tracing::error!("error {:?}", e);
+                ex.set("key", "DATABASE_ERROR");
+            }
+        })?;
+
+        let user = match user {
+            None => {
+                return Err(AppError::BadRequest("bad request".into())
+                    .extend()
+                    .extend_with(|_e, ex| ex.set("key", "UNKNOWN_USER")))
+            }
+            Some(user) => User::fetch_user(&mut tr, user.id).await?,
+        };
+        tr.commit().await.map_err(AppError::from).extend()?;
         Ok(user)
     }
 
@@ -451,10 +504,20 @@ impl MutationRoot {
                 tracing::error!("error {:?}", e);
                 ex.set("key", "DATABASE_ERROR")
             })?;
+        let user = match user {
+            Some(user) => user,
+            None => {
+                create_user(
+                    &mut tr,
+                    uuid::Uuid::new_v4().as_hyphenated().to_string(),
+                    phone_number,
+                    None,
+                )
+                .await?
+            }
+        };
         tr.commit().await.map_err(AppError::from).extend()?;
-        if user.is_some() {
-            send_verification_code(ctx, &user.unwrap()).await.extend()?;
-        }
+        send_verification_code(ctx, &user).await.extend()?;
         Ok(true)
     }
 
@@ -488,7 +551,7 @@ impl MutationRoot {
         Ok(user)
     }
 
-    #[graphql(guard = "LoginNeedsVerificationGuard::new()")]
+    #[graphql(guard = "LoginGuard::new()")]
     async fn delete_account(&self, ctx: &Context<'_>, code: String) -> FieldResult<bool> {
         let user = ctx.data_unchecked::<User>();
         let pool = ctx.data_unchecked::<PgPool>();

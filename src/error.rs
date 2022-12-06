@@ -9,6 +9,9 @@ pub enum AppError {
     #[error("db error, not found")]
     DBNotFound(sqlx::Error),
 
+    #[error("db error, unique constraint violation")]
+    DBUniqueContraintViolation { code: String, constraint: String },
+
     #[error("db error")]
     DB(sqlx::Error),
 
@@ -42,13 +45,39 @@ impl From<String> for AppError {
     }
 }
 impl From<sqlx::Error> for AppError {
-    fn from(s: sqlx::Error) -> AppError {
-        match s {
-            sqlx::Error::RowNotFound => AppError::DBNotFound(s),
-            _ => AppError::DB(s),
+    fn from(error: sqlx::Error) -> AppError {
+        match error {
+            sqlx::Error::RowNotFound => AppError::DBNotFound(error),
+            sqlx::Error::Database(ref e) => {
+                let code = e.code().map(String::from);
+                let constraint = e.constraint();
+                // https://www.postgresql.org/docs/current/errcodes-appendix.html
+                if code.is_some() && code.as_ref().unwrap() == "23505" {
+                    #[allow(clippy::unnecessary_unwrap)]
+                    AppError::DBUniqueContraintViolation {
+                        code: code.unwrap(),
+                        constraint: constraint.expect("expected constraint name").to_string(),
+                    }
+                } else {
+                    AppError::DB(error)
+                }
+            }
+            _ => AppError::DB(error),
         }
     }
 }
+
+impl AppError {
+    pub fn unique_constraint_error(&self) -> Option<(String, String)> {
+        match self {
+            AppError::DBUniqueContraintViolation { code, constraint } => {
+                Some((code.to_string(), constraint.to_string()))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl ErrorExtensions for AppError {
     fn extend(&self) -> FieldError {
         self.extend_with(|err, e| match err {
@@ -58,6 +87,8 @@ impl ErrorExtensions for AppError {
             }
             AppError::DB(_) => e.set("code", 500),
             AppError::DBNotFound(_) => e.set("code", 404),
+            #[allow(unused_variables)]
+            AppError::DBUniqueContraintViolation { code, constraint } => e.set("code", 500),
             AppError::Unverified(s) => {
                 e.set("code", 401);
                 e.set("error", s.clone());

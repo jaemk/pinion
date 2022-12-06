@@ -95,6 +95,9 @@ impl User {
     async fn handle(&self) -> &str {
         &self.handle
     }
+    async fn needs_handle(&self) -> bool {
+        uuid::Uuid::try_parse(&self.handle).is_ok()
+    }
     async fn group_associations(&self, ctx: &Context<'_>) -> FieldResult<Vec<GroupAssociation>> {
         let r = ctx
             .data_unchecked::<AppLoader>()
