@@ -8,6 +8,22 @@ use ring::pbkdf2;
 use crate::CONFIG;
 use std::num::NonZeroU32;
 
+const URL_SAFE_ENGINE: base64::engine::fast_portable::FastPortable =
+    base64::engine::fast_portable::FastPortable::from(
+        &base64::alphabet::URL_SAFE,
+        base64::engine::fast_portable::NO_PAD,
+    );
+
+pub fn b64_encode<S: AsRef<[u8]>>(s: S) -> String {
+    base64::encode_engine(s, &URL_SAFE_ENGINE)
+}
+pub fn b64_decode<S: AsRef<[u8]>>(s: S) -> crate::Result<Vec<u8>> {
+    Ok(base64::decode_engine(s, &URL_SAFE_ENGINE).map_err(|e| {
+        tracing::error!("error decoding base64 string {:?}", e);
+        e
+    })?)
+}
+
 /// Return a `Vec` of secure random bytes of size `n`
 pub fn rand_bytes(n: usize) -> crate::Result<Vec<u8>> {
     use ring::rand::SecureRandom;
@@ -163,9 +179,10 @@ pub fn encrypt_with_key(s: &str, key: &str) -> crate::Result<Enc> {
     let salt = new_pw_salt().map_err(|_| "error generating salt")?;
     let b = encrypt_bytes(s.as_bytes(), &nonce, key.as_bytes(), &salt)
         .map_err(|_| "encryption error")?;
-    let value = hex::encode(&b);
-    let nonce = hex::encode(&nonce);
-    let salt = hex::encode(&salt);
+
+    let value = b64_encode(&b);
+    let nonce = b64_encode(&nonce);
+    let salt = b64_encode(&salt);
     Ok(Enc { value, nonce, salt })
 }
 
@@ -174,11 +191,16 @@ pub fn decrypt(enc: &Enc) -> crate::Result<String> {
 }
 
 pub fn decrypt_with_key(enc: &Enc, key: &str) -> crate::Result<String> {
-    let nonce = hex::decode(&enc.nonce).map_err(|_| "nonce hex decode error")?;
-    let salt = hex::decode(&enc.salt).map_err(|_| "salt hex decode error")?;
-    let mut value = hex::decode(&enc.value).map_err(|_| "value hex decode error")?;
+    let nonce = b64_decode(&enc.nonce).map_err(|_| "nonce base64 decode error")?;
+    let salt = b64_decode(&enc.salt).map_err(|_| "salt base64 decode error")?;
+    let mut value = b64_decode(&enc.value).map_err(|_| "value base64 decode error")?;
     let bytes = decrypt_bytes(value.as_mut_slice(), &nonce, key.as_bytes(), &salt)
         .map_err(|_| "encryption error")?;
     let s = String::from_utf8(bytes.to_owned()).map_err(|_| "error decrypting bytes")?;
     Ok(s)
+}
+
+#[test]
+fn test_encrypt_decrypt() {
+    assert_eq!(decrypt(&encrypt("test").unwrap()).unwrap(), "test");
 }

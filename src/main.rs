@@ -12,6 +12,8 @@ mod loaders;
 mod models;
 mod schema;
 
+use crate::crypto::b64_decode;
+use crate::models::ChallengePhone;
 use error::{AppError, Result};
 use loaders::PgLoader;
 use models::User;
@@ -74,13 +76,17 @@ async fn run() -> Result<()> {
         .and(warp::post())
         .map(move || pool.clone())
         .and(warp::filters::cookie::optional(&CONFIG.cookie_name))
+        .and(warp::filters::cookie::optional(
+            &CONFIG.cookie_challenge_phone_name,
+        ))
         .and(async_graphql_warp::graphql(schema.clone()))
         .and_then(
             |pool: PgPool,
-             cookie: Option<String>,
+             auth_cookie: Option<String>,
+             challenge_phone_cookie: Option<String>,
              (schema, mut request): (Schema, async_graphql::Request)| async move {
-                if let Some(cookie) = cookie {
-                    let hash = crypto::hmac_sign(&cookie);
+                if let Some(auth_cookie) = auth_cookie {
+                    let hash = crypto::hmac_sign(&auth_cookie);
                     let u: Result<User> = sqlx::query_as(
                         r##"
                         select
@@ -122,6 +128,31 @@ async fn run() -> Result<()> {
                 );
                 request.data.insert(loader);
 
+                if let Some(challenge_cookie) = challenge_phone_cookie {
+                    b64_decode(&challenge_cookie)
+                        .map_err(|e| {
+                            tracing::error!("error base64 decoding challenge_phone_cookie {:?}", e);
+                            e
+                        })
+                        .and_then(|s| Ok(serde_json::from_slice(&s)?))
+                        .map_err(|e| {
+                            tracing::error!(
+                                "error decoding challenge_phone_cookie, expected json {:?}",
+                                e
+                            );
+                            e
+                        })
+                        .and_then(|enc| crypto::decrypt(&enc))
+                        .map_err(|e| {
+                            tracing::error!("error decrypting challenge_phone_cookie {:?}", e);
+                            e
+                        })
+                        .map(|number| {
+                            request.data.insert(ChallengePhone { number });
+                        })
+                        .ok();
+                }
+
                 let resp = schema.execute(request).await;
                 Ok::<_, Infallible>(GraphQLResponse::from(resp))
             },
@@ -138,6 +169,7 @@ async fn run() -> Result<()> {
         .allow_methods(&[Method::GET, Method::POST])
         .allow_headers(["cookie", "content-type"])
         .allow_origins([
+            "http://127.0.0.1:3000",
             "http://localhost:3000",
             "http://localhost:3003",
             "https://api.getpinion.com",

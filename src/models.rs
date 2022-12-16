@@ -3,6 +3,11 @@ use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object};
 use chrono::{DateTime, Utc};
 
+#[derive(Clone)]
+pub struct ChallengePhone {
+    pub number: String,
+}
+
 #[derive(Clone, sqlx::FromRow)]
 pub struct BaseUser {
     pub id: i64,

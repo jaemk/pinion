@@ -16,6 +16,7 @@ pub struct Config {
     pub real_host: Option<String>,
     pub real_domain: Option<String>,
     pub cookie_name: String,
+    pub cookie_challenge_phone_name: String,
     pub secure_cookie: bool, // only set to false for local dev
 
     pub log_level: String,
@@ -38,7 +39,11 @@ pub struct Config {
     // key used for signing/hashing things
     pub signing_key: String,
 
+    // auth cookie expiration
     pub auth_expiration_seconds: u32,
+    // phone challenge expiration, applies to phone challenge cookie
+    // and verification token lifetime
+    pub challenge_phone_expiration_seconds: u32,
 }
 impl Config {
     pub fn load() -> Self {
@@ -62,7 +67,8 @@ impl Config {
             port: env_or("PORT", "3003").parse().expect("invalid port"),
             real_host: std::env::var("REAL_HOSTNAME").ok(),
             real_domain: std::env::var("REAL_DOMAIN").ok(),
-            cookie_name: "poop_auth".to_string(),
+            cookie_name: "pinion_auth".to_string(),
+            cookie_challenge_phone_name: "pinion_challenge_phone".to_string(),
             secure_cookie: env_or("SECURE_COOKIE", "true") != "false",
             log_level: env_or("LOG_LEVEL", "info"),
             log_json: env_or("LOG_JSON", "false") == "true",
@@ -76,10 +82,14 @@ impl Config {
             db_max_connections: env_or("DATABASE_MAX_CONNECTIONS", "5")
                 .parse()
                 .expect("invalid DATABASE_MAX_CONNECTIONS"),
-            // 60 * 24 * 30
-            auth_expiration_seconds: env_or("AUTH_EXPIRATION_SECONDS", "43200")
+            // 60 * 60 * 24 * 30
+            auth_expiration_seconds: env_or("AUTH_EXPIRATION_SECONDS", "2592000")
                 .parse()
                 .expect("invalid auth_expiration_seconds"),
+            // 60 * 2
+            challenge_phone_expiration_seconds: env_or("CHALLENGE_PHONE_EXPIRATION_SECONDS", "120")
+                .parse()
+                .expect("invalid challenge_phone_expiration_seconds"),
             encryption_key: env_or("ENCRYPTION_KEY", "01234567890123456789012345678901"),
             signing_key: env_or("SIGNING_KEY", "01234567890123456789012345678901"),
         }

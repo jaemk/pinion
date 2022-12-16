@@ -33,6 +33,12 @@ pub enum AppError {
 
     #[error("request error")]
     Reqwest(#[from] reqwest::Error),
+
+    #[error("json error")]
+    Json(#[from] serde_json::Error),
+
+    #[error("base64 decode error")]
+    Base64Decode(#[from] base64::DecodeError),
 }
 impl From<&str> for AppError {
     fn from(s: &str) -> AppError {
@@ -108,6 +114,8 @@ impl ErrorExtensions for AppError {
             }
             AppError::Hex(_) => e.set("code", 500),
             AppError::Reqwest(_) => e.set("code", 500),
+            AppError::Json(_) => e.set("code", 500),
+            AppError::Base64Decode(_) => e.set("code", 500),
         })
     }
 }

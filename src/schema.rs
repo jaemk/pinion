@@ -1,4 +1,5 @@
-use crate::models::{BaseUser, Phone, User, VerificationCode};
+use crate::crypto::{b64_encode, encrypt};
+use crate::models::{BaseUser, ChallengePhone, Phone, User, VerificationCode};
 use crate::{AppError, Result, CONFIG};
 use async_graphql::{
     Context, EmptySubscription, ErrorExtensions, FieldResult, Guard, Object, ResultExt,
@@ -53,15 +54,40 @@ impl Guard for LoginNeedsVerificationGuard {
     }
 }
 
-fn format_set_cookie(token: &str) -> String {
+fn generate_clear_token() -> String {
+    let clear_token = hex::encode(crate::crypto::rand_bytes(31).unwrap_or_else(|_| vec![0; 31]));
+    format!("xx{clear_token}")
+}
+
+fn format_set_auth_cookie(token: &str) -> String {
     format!(
         "{name}={token}; Domain={domain}; {secure} HttpOnly; Max-Age={max_age}; SameSite=Lax; Path=/",
-        name = &CONFIG.cookie_name,
+        name = CONFIG.cookie_name,
         token = token,
         domain = &CONFIG.get_real_domain(),
         secure = if CONFIG.secure_cookie { "Secure;" } else { "" },
         max_age = &CONFIG.auth_expiration_seconds,
     )
+}
+
+fn format_set_challenge_phone_cookie(token: &str) -> String {
+    format!(
+        "{name}={token}; Domain={domain}; {secure} HttpOnly; Max-Age={max_age}; SameSite=Lax; Path=/",
+        name = CONFIG.cookie_challenge_phone_name,
+        token = token,
+        domain = &CONFIG.get_real_domain(),
+        secure = if CONFIG.secure_cookie { "Secure;" } else { "" },
+        max_age = &CONFIG.challenge_phone_expiration_seconds,
+    )
+}
+
+async fn challenge_phone_ctx(ctx: &Context<'_>, phone_number: &str) -> Result<()> {
+    let phone_enc = encrypt(phone_number)?;
+    let phone_json = serde_json::to_string(&phone_enc)?;
+    let s = b64_encode(&phone_json);
+    let cookie_str = format_set_challenge_phone_cookie(&s);
+    ctx.append_http_header("set-cookie", cookie_str);
+    Ok(())
 }
 
 async fn login_ctx(ctx: &Context<'_>, user: &User) -> Result<()> {
@@ -88,8 +114,11 @@ async fn login_ctx(ctx: &Context<'_>, user: &User) -> Result<()> {
         tracing::error!("error {:?}", e);
         AppError::from(e)
     })?;
-    let cookie_str = format_set_cookie(&token);
-    ctx.insert_http_header("set-cookie", cookie_str);
+    let cookie_str = format_set_auth_cookie(&token);
+    ctx.append_http_header("set-cookie", cookie_str);
+
+    let clear_cookie = format_set_challenge_phone_cookie(&generate_clear_token());
+    ctx.append_http_header("set-cookie", clear_cookie);
     Ok(())
 }
 
@@ -227,7 +256,7 @@ async fn _verify_code_for_user(
     let latest_code: Option<VerificationCode> = sqlx::query_as(
         r##"
         select * from pin.verification_codes
-        where user_id = $1
+        where user_id = $1 and deleted is false
         order by created desc
         limit 1
         "##,
@@ -242,8 +271,10 @@ async fn _verify_code_for_user(
     let latest_code = latest_code.unwrap();
     if latest_code.created
         < Utc::now()
-            .checked_sub_signed(chrono::Duration::seconds(120))
-            .expect("error calculating 2 minutes ago")
+            .checked_sub_signed(chrono::Duration::seconds(
+                CONFIG.challenge_phone_expiration_seconds as i64,
+            ))
+            .expect("error calculating challenge phone offset")
     {
         return Err(AppError::BadRequest("invalid code".into()));
     }
@@ -283,7 +314,7 @@ async fn _verify_code_for_user(
 async fn create_user(
     tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     handle: String,
-    phone_number: String,
+    phone_number: &str,
     name: Option<String>,
 ) -> FieldResult<User> {
     let user: Option<BaseUser> = sqlx::query_as(
@@ -409,7 +440,7 @@ impl MutationRoot {
             .map_err(AppError::from)
             .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
 
-        let user = create_user(&mut tr, handle, phone_number, name).await?;
+        let user = create_user(&mut tr, handle, &phone_number, name).await?;
         tr.commit().await.map_err(AppError::from).extend()?;
         send_verification_code(ctx, &user).await.extend()?;
         login_ctx(ctx, &user).await.extend()?;
@@ -461,7 +492,7 @@ impl MutationRoot {
     async fn login_phone_confirm(
         &self,
         ctx: &Context<'_>,
-        phone_number: String,
+        phone_number: Option<String>,
         code: String,
     ) -> FieldResult<User> {
         let pool = ctx.data_unchecked::<PgPool>();
@@ -471,6 +502,18 @@ impl MutationRoot {
             .map_err(AppError::from)
             .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
 
+        let phone_number = phone_number.or_else(|| {
+            tracing::info!("no phone number specified, using challenge-ctx cookie number");
+            ctx.data_opt::<ChallengePhone>().map(|p| p.number.clone())
+        });
+        let phone_number = match phone_number {
+            None => {
+                tracing::error!("no phone number provided or found while verifying code");
+                return Err(AppError::from("no phone number provided or found"))
+                    .extend_err(|_e, ex| ex.set("key", "MISSING_PHONE_NUMBER"));
+            }
+            Some(p) => p,
+        };
         let user = User::fetch_user_by_number(&mut tr, &phone_number)
             .await
             .extend_err(|e, ex| {
@@ -510,7 +553,7 @@ impl MutationRoot {
                 create_user(
                     &mut tr,
                     uuid::Uuid::new_v4().as_hyphenated().to_string(),
-                    phone_number,
+                    &phone_number,
                     None,
                 )
                 .await?
@@ -518,14 +561,13 @@ impl MutationRoot {
         };
         tr.commit().await.map_err(AppError::from).extend()?;
         send_verification_code(ctx, &user).await.extend()?;
+        challenge_phone_ctx(ctx, &phone_number).await.extend()?;
         Ok(true)
     }
 
     async fn logout(&self, ctx: &Context<'_>) -> bool {
-        let token = hex::encode(crate::crypto::rand_bytes(31).unwrap_or_else(|_| vec![0; 31]));
-        let token = format!("xx{token}");
-        let cookie_str = format_set_cookie(&token);
-        ctx.insert_http_header("set-cookie", cookie_str);
+        let cookie_str = format_set_auth_cookie(&generate_clear_token());
+        ctx.append_http_header("set-cookie", cookie_str);
         true
     }
 
