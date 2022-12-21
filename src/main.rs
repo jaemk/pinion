@@ -129,28 +129,33 @@ async fn run() -> Result<()> {
                 request.data.insert(loader);
 
                 if let Some(challenge_cookie) = challenge_phone_cookie {
-                    b64_decode(&challenge_cookie)
-                        .map_err(|e| {
-                            tracing::error!("error base64 decoding challenge_phone_cookie {:?}", e);
-                            e
-                        })
-                        .and_then(|s| Ok(serde_json::from_slice(&s)?))
-                        .map_err(|e| {
-                            tracing::error!(
-                                "error decoding challenge_phone_cookie, expected json {:?}",
+                    if !challenge_cookie.starts_with("xxxx") {
+                        b64_decode(&challenge_cookie)
+                            .map_err(|e| {
+                                tracing::error!(
+                                    "error base64 decoding challenge_phone_cookie {:?}",
+                                    e
+                                );
                                 e
-                            );
-                            e
-                        })
-                        .and_then(|enc| crypto::decrypt(&enc))
-                        .map_err(|e| {
-                            tracing::error!("error decrypting challenge_phone_cookie {:?}", e);
-                            e
-                        })
-                        .map(|number| {
-                            request.data.insert(ChallengePhone { number });
-                        })
-                        .ok();
+                            })
+                            .and_then(|s| Ok(serde_json::from_slice(&s)?))
+                            .map_err(|e| {
+                                tracing::error!(
+                                    "error decoding challenge_phone_cookie, expected json {:?}",
+                                    e
+                                );
+                                e
+                            })
+                            .and_then(|enc| crypto::decrypt(&enc))
+                            .map_err(|e| {
+                                tracing::error!("error decrypting challenge_phone_cookie {:?}", e);
+                                e
+                            })
+                            .map(|number| {
+                                request.data.insert(ChallengePhone { number });
+                            })
+                            .ok();
+                    }
                 }
 
                 let resp = schema.execute(request).await;

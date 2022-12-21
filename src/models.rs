@@ -1,4 +1,6 @@
-use crate::loaders::{AppLoader, GroupAssociationsForUserId, UserId};
+use crate::loaders::{
+    AppLoader, GroupAssociationsForUserId, MultiOptionsForQuestion, QuestionOfDay, UserId,
+};
 use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object};
 use chrono::{DateTime, Utc};
@@ -109,6 +111,14 @@ impl User {
             .load_one(GroupAssociationsForUserId(self.id))
             .await?
             .unwrap_or_default();
+        Ok(r)
+    }
+    async fn question_of_day(&self, ctx: &Context<'_>) -> FieldResult<Question> {
+        let r = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(QuestionOfDay {})
+            .await?
+            .unwrap();
         Ok(r)
     }
     async fn created(&self) -> DateTime<Utc> {
@@ -250,4 +260,79 @@ impl GroupAssociation {
     async fn modified(&self) -> DateTime<Utc> {
         self.modified
     }
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub struct Question {
+    pub id: i64,
+    pub kind: String,
+    pub prompt: String,
+    pub used: Option<DateTime<Utc>>,
+    pub priority: i64,
+    pub deleted: bool,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+}
+
+#[Object]
+impl Question {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+    async fn kind(&self) -> String {
+        self.kind.clone()
+    }
+    async fn prompt(&self) -> String {
+        self.prompt.clone()
+    }
+    async fn options(&self, ctx: &Context<'_>) -> FieldResult<Option<Vec<QuestionMultiOption>>> {
+        if self.kind != "multi" {
+            Ok(None)
+        } else {
+            let r = ctx
+                .data_unchecked::<AppLoader>()
+                .load_one(MultiOptionsForQuestion(self.id))
+                .await?
+                .unwrap_or_default();
+            Ok(Some(r))
+        }
+    }
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub struct QuestionMultiOption {
+    pub id: i64,
+    pub question_id: i64,
+    pub rank: i64,
+    pub value: String,
+    pub deleted: bool,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+}
+
+#[Object]
+impl QuestionMultiOption {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+    async fn question_id(&self) -> String {
+        self.question_id.to_string()
+    }
+    async fn rank(&self) -> i64 {
+        self.rank
+    }
+    async fn value(&self) -> String {
+        self.value.to_string()
+    }
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub struct Pinion {
+    pub id: i64,
+    pub user_id: i64,
+    pub question_id: i64,
+    pub multi_selection: i64,
+    pub deleted: bool,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
 }

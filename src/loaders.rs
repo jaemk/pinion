@@ -1,4 +1,4 @@
-use crate::models::{GroupAssociation, User};
+use crate::models::{GroupAssociation, Question, QuestionMultiOption, User};
 use crate::AppError;
 use async_graphql::dataloader::{DataLoader, HashMapCache};
 use sqlx::PgPool;
@@ -83,6 +83,88 @@ impl async_graphql::dataloader::Loader<GroupAssociationsForUserId> for PgLoader 
                     .entry(GroupAssociationsForUserId(ga.user_id))
                     .or_insert_with(Vec::new);
                 e.push(ga);
+            }
+            acc
+        });
+        Ok(res)
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct QuestionOfDay;
+
+#[async_trait::async_trait]
+impl async_graphql::dataloader::Loader<QuestionOfDay> for PgLoader {
+    type Value = Question;
+    type Error = std::sync::Arc<AppError>;
+
+    async fn load(
+        &self,
+        keys: &[QuestionOfDay],
+    ) -> std::result::Result<HashMap<QuestionOfDay, Self::Value>, Self::Error> {
+        tracing::info!("loading question of the day");
+        let query = r##"
+        select * from pin.questions
+            where
+                deleted is false and
+                (
+                    used::date = timezone('America/New_York', now())::date
+                    or used is null
+                )
+            order by used nulls last, priority asc nulls last
+            limit 1
+        "##;
+        let question: Question =
+            sqlx::query_as(query)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| {
+                    tracing::error!("error loading question of the day {:?}", e);
+                    AppError::from(e)
+                })?;
+        tracing::info!("loaded question of the day");
+        let mut res = HashMap::new();
+        res.insert(keys[0].clone(), question);
+        Ok(res)
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct MultiOptionsForQuestion(pub i64);
+
+#[async_trait::async_trait]
+impl async_graphql::dataloader::Loader<MultiOptionsForQuestion> for PgLoader {
+    type Value = Vec<QuestionMultiOption>;
+    type Error = std::sync::Arc<AppError>;
+
+    async fn load(
+        &self,
+        keys: &[MultiOptionsForQuestion],
+    ) -> std::result::Result<HashMap<MultiOptionsForQuestion, Self::Value>, Self::Error> {
+        tracing::info!("loading multi optoins for {} questions", keys.len());
+        let query = r##"
+        select * from pin.question_multi_options
+            where
+                deleted is false and
+                question_id in (select * from unnest($1))
+            order by rank asc
+        "##;
+        let keys = keys.iter().map(|ga| ga.0).collect::<Vec<_>>();
+        let res: Vec<QuestionMultiOption> = sqlx::query_as(query)
+            .bind(&keys)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("error loading question multi options {:?}", e);
+                AppError::from(e)
+            })?;
+        tracing::info!("loaded {} question multi options", res.len());
+        let res = res.into_iter().fold(HashMap::new(), |mut acc, opt| {
+            {
+                let e = acc
+                    .entry(MultiOptionsForQuestion(opt.question_id))
+                    .or_insert_with(Vec::new);
+                e.push(opt);
             }
             acc
         });

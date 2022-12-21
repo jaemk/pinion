@@ -56,7 +56,7 @@ impl Guard for LoginNeedsVerificationGuard {
 
 fn generate_clear_token() -> String {
     let clear_token = hex::encode(crate::crypto::rand_bytes(31).unwrap_or_else(|_| vec![0; 31]));
-    format!("xx{clear_token}")
+    format!("xxxx{clear_token}")
 }
 
 fn format_set_auth_cookie(token: &str) -> String {
