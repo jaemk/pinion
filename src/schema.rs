@@ -669,8 +669,13 @@ impl MutationRoot {
         .await
         .map_err(AppError::from)
         .extend_err(|e, ex| {
-            tracing::error!("error saving pinion {:?}", e);
-            ex.set("key", "DATABASE_ERROR")
+            if let Some((_code, _constraint)) = e.unique_constraint_error() {
+                tracing::info!("{} submitted multiple pinions in one day", &user.handle);
+                ex.set("key", "MULTIPLE_DAILY_RESPONSES");
+            } else {
+                tracing::error!("error saving pinion {:?}", e);
+                ex.set("key", "DATABASE_ERROR");
+            }
         })?;
         tr.commit().await.map_err(AppError::from).extend()?;
         Ok(pinion)
