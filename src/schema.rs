@@ -1,5 +1,5 @@
 use crate::crypto::{b64_encode, encrypt};
-use crate::models::{BaseUser, ChallengePhone, Phone, User, VerificationCode};
+use crate::models::{BaseUser, ChallengePhone, Phone, Pinion, User, VerificationCode};
 use crate::{AppError, Result, CONFIG};
 use async_graphql::{
     Context, EmptySubscription, ErrorExtensions, FieldResult, Guard, Object, ResultExt,
@@ -642,6 +642,38 @@ impl MutationRoot {
         tr.commit().await.map_err(AppError::from).extend()?;
         let r = self.logout(ctx).await?;
         Ok(r)
+    }
+
+    #[graphql(guard = "LoginGuard::new()")]
+    async fn opine(
+        &self,
+        ctx: &Context<'_>,
+        question_id: String,
+        multi_selection_id: String,
+    ) -> FieldResult<Pinion> {
+        let user = ctx.data_unchecked::<User>();
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool.begin().await.map_err(AppError::from).extend()?;
+        let pinion: Pinion = sqlx::query_as(
+            r##"
+            insert into pin.pinions
+                (user_id, question_id, multi_selection)
+                values ($1, $2, $3)
+                returning *
+        "##,
+        )
+        .bind(user.id)
+        .bind(question_id.parse::<i64>()?)
+        .bind(multi_selection_id.parse::<i64>()?)
+        .fetch_one(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|e, ex| {
+            tracing::error!("error saving pinion {:?}", e);
+            ex.set("key", "DATABASE_ERROR")
+        })?;
+        tr.commit().await.map_err(AppError::from).extend()?;
+        Ok(pinion)
     }
 }
 

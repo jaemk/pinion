@@ -1,4 +1,4 @@
-use crate::models::{GroupAssociation, Question, QuestionMultiOption, User};
+use crate::models::{GroupAssociation, Pinion, Question, QuestionMultiOption, User};
 use crate::AppError;
 use async_graphql::dataloader::{DataLoader, HashMapCache};
 use sqlx::PgPool;
@@ -93,6 +93,18 @@ impl async_graphql::dataloader::Loader<GroupAssociationsForUserId> for PgLoader 
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct QuestionOfDay;
 
+pub static QOD_QUERY: &str = r##"
+        select * from pin.questions
+            where
+                deleted is false and
+                (
+                    used::date >= timezone('America/New_York', now())::date
+                    or used is null
+                )
+            order by used asc nulls last, priority asc nulls last, created asc
+            limit 1
+        "##;
+
 #[async_trait::async_trait]
 impl async_graphql::dataloader::Loader<QuestionOfDay> for PgLoader {
     type Value = Question;
@@ -103,25 +115,13 @@ impl async_graphql::dataloader::Loader<QuestionOfDay> for PgLoader {
         keys: &[QuestionOfDay],
     ) -> std::result::Result<HashMap<QuestionOfDay, Self::Value>, Self::Error> {
         tracing::info!("loading question of the day");
-        let query = r##"
-        select * from pin.questions
-            where
-                deleted is false and
-                (
-                    used::date = timezone('America/New_York', now())::date
-                    or used is null
-                )
-            order by used nulls last, priority asc nulls last
-            limit 1
-        "##;
-        let question: Question =
-            sqlx::query_as(query)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| {
-                    tracing::error!("error loading question of the day {:?}", e);
-                    AppError::from(e)
-                })?;
+        let question: Question = sqlx::query_as(QOD_QUERY)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("error loading question of the day {:?}", e);
+                AppError::from(e)
+            })?;
         tracing::info!("loaded question of the day");
         let mut res = HashMap::new();
         res.insert(keys[0].clone(), question);
@@ -166,6 +166,43 @@ impl async_graphql::dataloader::Loader<MultiOptionsForQuestion> for PgLoader {
                     .or_insert_with(Vec::new);
                 e.push(opt);
             }
+            acc
+        });
+        Ok(res)
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct PinionForQuestion(pub i64);
+
+#[async_trait::async_trait]
+impl async_graphql::dataloader::Loader<PinionForQuestion> for PgLoader {
+    type Value = Pinion;
+    type Error = std::sync::Arc<AppError>;
+
+    async fn load(
+        &self,
+        keys: &[PinionForQuestion],
+    ) -> std::result::Result<HashMap<PinionForQuestion, Self::Value>, Self::Error> {
+        tracing::info!("loading pinions for {} questions", keys.len());
+        let query = r##"
+        select * from pin.pinions
+            where
+                deleted is false and
+                question_id in (select * from unnest($1))
+        "##;
+        let keys = keys.iter().map(|ga| ga.0).collect::<Vec<_>>();
+        let res: Vec<Pinion> = sqlx::query_as(query)
+            .bind(&keys)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("error loading pinions {:?}", e);
+                AppError::from(e)
+            })?;
+        tracing::info!("loaded {} pinions", res.len());
+        let res = res.into_iter().fold(HashMap::new(), |mut acc, pin| {
+            acc.insert(PinionForQuestion(pin.question_id), pin);
             acc
         });
         Ok(res)
