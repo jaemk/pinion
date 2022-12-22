@@ -3,6 +3,7 @@ use async_graphql_warp::GraphQLResponse;
 use sqlx::PgPool;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::time::Duration;
 use warp::{hyper::Method, Filter};
 
 mod config;
@@ -13,7 +14,8 @@ mod models;
 mod schema;
 
 use crate::crypto::b64_decode;
-use crate::models::ChallengePhone;
+use crate::loaders::QOD_QUERY;
+use crate::models::{ChallengePhone, Question};
 use error::{AppError, Result};
 use loaders::PgLoader;
 use models::User;
@@ -71,10 +73,11 @@ async fn run() -> Result<()> {
         .data(pool.clone())
         .finish();
 
+    let move_pool = pool.clone();
     let graphql_post = warp::path!("api" / "graphql")
         .and(warp::path::end())
         .and(warp::post())
-        .map(move || pool.clone())
+        .map(move || move_pool.clone())
         .and(warp::filters::cookie::optional(&CONFIG.cookie_name))
         .and(warp::filters::cookie::optional(
             &CONFIG.cookie_challenge_phone_name,
@@ -187,6 +190,54 @@ async fn run() -> Result<()> {
         .or(status)
         .with(cors)
         .with(warp::trace::request());
+
+    async fn set_question_of_the_day(pool: PgPool) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let question: Result<Question> = sqlx::query_as(QOD_QUERY)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| {
+                    tracing::error!("background: error loading question of the day {:?}", e);
+                    AppError::from(e)
+                });
+            if question.is_err() {
+                continue;
+            }
+            let question = question.unwrap();
+            if matches!(question.used, None) {
+                let tr = pool.begin().await.map_err(|e| {
+                    tracing::error!("background: error starting transaction {:?}", e);
+                    AppError::from(e)
+                });
+                if tr.is_err() {
+                    continue;
+                }
+                let mut tr = tr.unwrap();
+                let question = Question::mark_used(question.id, &mut tr)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("background: error marking question used {:?}", e);
+                        e
+                    });
+                if question.is_err() {
+                    continue;
+                }
+                tr.commit()
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            "background: error marking question used transaction {:?}",
+                            e
+                        );
+                        AppError::from(e)
+                    })
+                    .ok();
+            }
+        }
+    }
+
+    tokio::spawn(set_question_of_the_day(pool.clone()));
 
     if !CONFIG.secure_cookie {
         tracing::warn!("*** SECURE COOKIE IS DISABLED ***");

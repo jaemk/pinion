@@ -1,5 +1,6 @@
 use crate::loaders::{
-    AppLoader, GroupAssociationsForUserId, MultiOptionsForQuestion, QuestionOfDay, UserId,
+    AppLoader, GroupAssociationsForUserId, MultiOptionsForQuestion, PinionForQuestion,
+    QuestionOfDay, UserId,
 };
 use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object};
@@ -273,6 +274,23 @@ pub struct Question {
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
 }
+impl Question {
+    pub async fn mark_used(
+        id: i64,
+        tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Question> {
+        let question: Question = sqlx::query_as(
+            r##"
+            update pin.questions set used = now() where id = $1 returning *
+            "##,
+        )
+        .bind(id)
+        .fetch_one(&mut *tr)
+        .await
+        .map_err(AppError::from)?;
+        Ok(question)
+    }
+}
 
 #[Object]
 impl Question {
@@ -285,6 +303,13 @@ impl Question {
     async fn prompt(&self) -> String {
         self.prompt.clone()
     }
+    async fn pinion(&self, ctx: &Context<'_>) -> FieldResult<Option<Pinion>> {
+        let r = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(PinionForQuestion(self.id))
+            .await?;
+        Ok(r)
+    }
     async fn options(&self, ctx: &Context<'_>) -> FieldResult<Option<Vec<QuestionMultiOption>>> {
         if self.kind != "multi" {
             Ok(None)
@@ -296,6 +321,55 @@ impl Question {
                 .unwrap_or_default();
             Ok(Some(r))
         }
+    }
+    async fn summary(&self) -> Option<QuestionSummary> {
+        Some(QuestionSummary { id: 1 })
+    }
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub struct QuestionSummary {
+    pub id: i64,
+    // pub question_id: i64,
+    // pub deleted: bool,
+    // pub created: DateTime<Utc>,
+    // pub modified: DateTime<Utc>,
+}
+
+struct AnswerPercentage {
+    option_id: i64,
+    rank: i64,
+    percentage: i64,
+}
+
+#[Object]
+impl AnswerPercentage {
+    async fn option_id(&self) -> String {
+        self.option_id.to_string()
+    }
+    async fn rank(&self) -> i64 {
+        self.rank
+    }
+    async fn percentage(&self) -> i64 {
+        self.percentage
+    }
+}
+
+#[Object]
+impl QuestionSummary {
+    async fn percentages(&self) -> Vec<AnswerPercentage> {
+        vec![
+            AnswerPercentage {
+                option_id: 1,
+                rank: 0,
+                percentage: 99,
+            },
+            AnswerPercentage {
+                option_id: 2,
+                rank: 1,
+                percentage: 1,
+            },
+        ]
     }
 }
 
@@ -335,4 +409,17 @@ pub struct Pinion {
     pub deleted: bool,
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
+}
+
+#[Object]
+impl Pinion {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+    async fn question_id(&self) -> String {
+        self.question_id.to_string()
+    }
+    async fn multi_selection_id(&self) -> String {
+        self.multi_selection.to_string()
+    }
 }
