@@ -1,6 +1,7 @@
 use async_graphql::{dataloader::HashMapCache, EmptySubscription};
 use async_graphql_warp::GraphQLResponse;
-use sqlx::PgPool;
+use sqlx::postgres::PgConnectOptions;
+use sqlx::{ConnectOptions, PgPool};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -48,7 +49,11 @@ async fn run() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
-    let pool = sqlx::PgPool::connect(&CONFIG.database_url).await?;
+    let mut pg_opt: PgConnectOptions = CONFIG.database_url.parse()?;
+    pg_opt
+        .log_statements(log::LevelFilter::Debug)
+        .log_slow_statements(log::LevelFilter::Warn, std::time::Duration::new(5, 0));
+    let pool = sqlx::PgPool::connect_with(pg_opt).await?;
 
     let status = warp::path("status").and(warp::get()).map(move || {
         #[derive(serde::Serialize)]
