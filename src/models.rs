@@ -106,6 +106,9 @@ impl User {
     async fn needs_handle(&self) -> bool {
         uuid::Uuid::try_parse(&self.handle).is_ok()
     }
+    async fn phone_verified(&self) -> Option<DateTime<Utc>> {
+        self.phone_verified
+    }
     async fn group_associations(&self, ctx: &Context<'_>) -> FieldResult<Vec<GroupAssociation>> {
         let r = ctx
             .data_unchecked::<AppLoader>()
