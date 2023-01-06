@@ -1,6 +1,7 @@
 use async_graphql::{dataloader::HashMapCache, EmptySubscription};
 use async_graphql_warp::GraphQLResponse;
-use sqlx::PgPool;
+use sqlx::postgres::PgConnectOptions;
+use sqlx::{ConnectOptions, PgPool};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -48,7 +49,11 @@ async fn run() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
-    let pool = sqlx::PgPool::connect(&CONFIG.database_url).await?;
+    let mut pg_opt: PgConnectOptions = CONFIG.database_url.parse()?;
+    pg_opt
+        .log_statements(log::LevelFilter::Debug)
+        .log_slow_statements(log::LevelFilter::Warn, std::time::Duration::new(5, 0));
+    let pool = sqlx::PgPool::connect_with(pg_opt).await?;
 
     let status = warp::path("status").and(warp::get()).map(move || {
         #[derive(serde::Serialize)]
@@ -78,7 +83,8 @@ async fn run() -> Result<()> {
         .and(warp::path::end())
         .and(warp::post())
         .map(move || move_pool.clone())
-        .and(warp::filters::cookie::optional(&CONFIG.cookie_name))
+        .and(warp::filters::cookie::optional(&CONFIG.auth_cookie_name))
+        .and(warp::filters::header::optional(&CONFIG.auth_header_name))
         .and(warp::filters::cookie::optional(
             &CONFIG.cookie_challenge_phone_name,
         ))
@@ -86,10 +92,11 @@ async fn run() -> Result<()> {
         .and_then(
             |pool: PgPool,
              auth_cookie: Option<String>,
+             auth_header: Option<String>,
              challenge_phone_cookie: Option<String>,
              (schema, mut request): (Schema, async_graphql::Request)| async move {
-                if let Some(auth_cookie) = auth_cookie {
-                    let hash = crypto::hmac_sign(&auth_cookie);
+                if let Some(auth) = auth_cookie.or(auth_header) {
+                    let hash = crypto::hmac_sign(&auth);
                     let u: Result<User> = sqlx::query_as(
                         r##"
                         select
