@@ -83,7 +83,8 @@ async fn run() -> Result<()> {
         .and(warp::path::end())
         .and(warp::post())
         .map(move || move_pool.clone())
-        .and(warp::filters::cookie::optional(&CONFIG.cookie_name))
+        .and(warp::filters::cookie::optional(&CONFIG.auth_cookie_name))
+        .and(warp::filters::header::optional(&CONFIG.auth_header_name))
         .and(warp::filters::cookie::optional(
             &CONFIG.cookie_challenge_phone_name,
         ))
@@ -91,10 +92,11 @@ async fn run() -> Result<()> {
         .and_then(
             |pool: PgPool,
              auth_cookie: Option<String>,
+             auth_header: Option<String>,
              challenge_phone_cookie: Option<String>,
              (schema, mut request): (Schema, async_graphql::Request)| async move {
-                if let Some(auth_cookie) = auth_cookie {
-                    let hash = crypto::hmac_sign(&auth_cookie);
+                if let Some(auth) = auth_cookie.or(auth_header) {
+                    let hash = crypto::hmac_sign(&auth);
                     let u: Result<User> = sqlx::query_as(
                         r##"
                         select

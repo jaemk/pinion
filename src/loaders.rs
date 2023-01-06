@@ -141,7 +141,7 @@ impl async_graphql::dataloader::Loader<MultiOptionsForQuestion> for PgLoader {
         &self,
         keys: &[MultiOptionsForQuestion],
     ) -> std::result::Result<HashMap<MultiOptionsForQuestion, Self::Value>, Self::Error> {
-        tracing::info!("loading multi optoins for {} questions", keys.len());
+        tracing::info!("loading multi options for {} questions", keys.len());
         let query = r##"
         select * from pin.question_multi_options
             where

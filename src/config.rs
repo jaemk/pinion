@@ -15,7 +15,8 @@ pub struct Config {
     // and auth cookie
     pub real_host: Option<String>,
     pub real_domain: Option<String>,
-    pub cookie_name: String,
+    pub auth_header_name: String,
+    pub auth_cookie_name: String,
     pub cookie_challenge_phone_name: String,
     pub secure_cookie: bool, // only set to false for local dev
 
@@ -67,7 +68,8 @@ impl Config {
             port: env_or("PORT", "3003").parse().expect("invalid port"),
             real_host: std::env::var("REAL_HOSTNAME").ok(),
             real_domain: std::env::var("REAL_DOMAIN").ok(),
-            cookie_name: "pinion_auth".to_string(),
+            auth_header_name: "x-pinion-auth".to_string(),
+            auth_cookie_name: "pinion_auth".to_string(),
             cookie_challenge_phone_name: "pinion_challenge_phone".to_string(),
             secure_cookie: env_or("SECURE_COOKIE", "true") != "false",
             log_level: env_or("LOG_LEVEL", "info"),

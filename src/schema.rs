@@ -1,5 +1,7 @@
 use crate::crypto::{b64_encode, encrypt};
-use crate::models::{BaseUser, ChallengePhone, Phone, Pinion, User, VerificationCode};
+use crate::models::{
+    BaseUser, ChallengePhone, LoginSuccess, Phone, Pinion, User, VerificationCode,
+};
 use crate::{AppError, Result, CONFIG};
 use async_graphql::{
     Context, EmptySubscription, ErrorExtensions, FieldResult, Guard, Object, ResultExt,
@@ -62,7 +64,7 @@ fn generate_clear_token() -> String {
 fn format_set_auth_cookie(token: &str) -> String {
     format!(
         "{name}={token}; Domain={domain}; {secure} HttpOnly; Max-Age={max_age}; SameSite=Lax; Path=/",
-        name = CONFIG.cookie_name,
+        name = CONFIG.auth_cookie_name,
         token = token,
         domain = &CONFIG.get_real_domain(),
         secure = if CONFIG.secure_cookie { "Secure;" } else { "" },
@@ -90,7 +92,7 @@ async fn challenge_phone_ctx(ctx: &Context<'_>, phone_number: &str) -> Result<()
     Ok(())
 }
 
-async fn login_ctx(ctx: &Context<'_>, user: &User) -> Result<()> {
+async fn login_ctx(ctx: &Context<'_>, user: &User) -> Result<String> {
     let pool = ctx.data_unchecked::<PgPool>();
     let token = hex::encode(crate::crypto::rand_bytes(32)?);
     let token_hash = crate::crypto::hmac_sign(&token);
@@ -119,7 +121,7 @@ async fn login_ctx(ctx: &Context<'_>, user: &User) -> Result<()> {
 
     let clear_cookie = format_set_challenge_phone_cookie(&generate_clear_token());
     ctx.append_http_header("set-cookie", clear_cookie);
-    Ok(())
+    Ok(token)
 }
 
 async fn send_verification_code(ctx: &Context<'_>, user: &User) -> Result<String> {
@@ -494,7 +496,7 @@ impl MutationRoot {
         ctx: &Context<'_>,
         phone_number: Option<String>,
         code: String,
-    ) -> FieldResult<User> {
+    ) -> FieldResult<LoginSuccess> {
         let pool = ctx.data_unchecked::<PgPool>();
         let mut tr = pool
             .begin()
@@ -534,8 +536,11 @@ impl MutationRoot {
             })?;
 
         tr.commit().await.map_err(AppError::from).extend()?;
-        login_ctx(ctx, &user).await.extend()?;
-        Ok(user)
+        let token = login_ctx(ctx, &user).await.extend()?;
+        Ok(LoginSuccess {
+            auth_token: token,
+            user,
+        })
     }
 
     async fn login_phone(&self, ctx: &Context<'_>, phone_number: String) -> FieldResult<bool> {

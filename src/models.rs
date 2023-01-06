@@ -156,6 +156,21 @@ impl SimpleUser {
     }
 }
 
+#[derive(Clone)]
+pub struct LoginSuccess {
+    pub auth_token: String,
+    pub user: User,
+}
+#[Object]
+impl LoginSuccess {
+    async fn auth_token(&self) -> String {
+        self.auth_token.clone()
+    }
+    async fn user(&self) -> &User {
+        &self.user
+    }
+}
+
 #[derive(Clone, sqlx::FromRow)]
 pub struct VerificationCode {
     pub id: i64,
