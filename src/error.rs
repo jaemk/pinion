@@ -28,6 +28,9 @@ pub enum AppError {
     #[error("bad request")]
     BadRequest(String),
 
+    #[error("invalid verification code")]
+    InvalidVerificationCode(String),
+
     #[error("hex error")]
     Hex(#[from] hex::FromHexError),
 
@@ -82,42 +85,97 @@ impl AppError {
             _ => None,
         }
     }
+
+    fn log_error(&self) {
+        match self {
+            AppError::InvalidVerificationCode(s) => {
+                tracing::warn!("invalid verification code: {}", s)
+            }
+            AppError::E(s) => tracing::error!("Error: {}", s),
+            e => tracing::error!("Error: {:?}", e),
+        }
+    }
+    fn log_error_msg<S: AsRef<str>>(&self, msg: S) {
+        match self {
+            AppError::InvalidVerificationCode(s) => tracing::warn!("{}: {}", msg.as_ref(), s),
+            AppError::E(s) => tracing::error!("{}: {}", msg.as_ref(), s),
+            e => tracing::error!("{}: {:?}", msg.as_ref(), e),
+        }
+    }
 }
 
 impl ErrorExtensions for AppError {
     fn extend(&self) -> FieldError {
-        self.extend_with(|err, e| match err {
-            AppError::E(s) => {
-                e.set("code", "500");
-                e.set("error", s.clone());
+        self.extend_with(|err, e| {
+            e.set("code", 500);
+            e.set("key", "UNKNOWN");
+            match err {
+                AppError::E(s) => {
+                    e.set("code", "500");
+                    e.set("error", s.clone());
+                }
+                AppError::DB(_) => {
+                    e.set("code", 500);
+                    e.set("key", "DATABASE_ERROR");
+                }
+                AppError::DBNotFound(_) => e.set("code", 404),
+                #[allow(unused_variables)]
+                AppError::DBUniqueContraintViolation { code, constraint } => {
+                    e.set("code", 500);
+                    e.set("key", "CONSTRAINT");
+                }
+                AppError::Unverified(s) => {
+                    e.set("code", 401);
+                    e.set("error", s.clone());
+                    e.set("key", "UNVERIFIED");
+                }
+                AppError::Unauthorized(s) => {
+                    e.set("code", 401);
+                    e.set("error", s.clone());
+                    e.set("key", "UNAUTHORIZED");
+                }
+                AppError::Forbidden(s) => {
+                    e.set("code", 403);
+                    e.set("error", s.clone());
+                    e.set("key", "FORBIDDEN");
+                }
+                AppError::BadRequest(s) => {
+                    e.set("code", 400);
+                    e.set("error", s.clone());
+                    e.set("key", "BAD_REQUEST");
+                }
+                AppError::InvalidVerificationCode(s) => {
+                    e.set("code", 400);
+                    e.set("error", s.clone());
+                    e.set("key", "INVALID_CODE");
+                }
+                AppError::Hex(_) => e.set("code", 500),
+                AppError::Reqwest(_) => e.set("code", 500),
+                AppError::Json(_) => e.set("code", 500),
+                AppError::Base64Decode(_) => e.set("code", 500),
             }
-            AppError::DB(_) => e.set("code", 500),
-            AppError::DBNotFound(_) => e.set("code", 404),
-            #[allow(unused_variables)]
-            AppError::DBUniqueContraintViolation { code, constraint } => e.set("code", 500),
-            AppError::Unverified(s) => {
-                e.set("code", 401);
-                e.set("error", s.clone());
-                e.set("key", "UNVERIFIED");
-            }
-            AppError::Unauthorized(s) => {
-                e.set("code", 401);
-                e.set("error", s.clone());
-            }
-            AppError::Forbidden(s) => {
-                e.set("code", 403);
-                e.set("error", s.clone());
-            }
-            AppError::BadRequest(s) => {
-                e.set("code", 400);
-                e.set("error", s.clone());
-            }
-            AppError::Hex(_) => e.set("code", 500),
-            AppError::Reqwest(_) => e.set("code", 500),
-            AppError::Json(_) => e.set("code", 500),
-            AppError::Base64Decode(_) => e.set("code", 500),
         })
     }
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
+
+pub trait LogError {
+    fn log_error(self) -> Self;
+    fn log_error_msg<S: AsRef<str>, F: FnOnce() -> S>(self, make_msg: F) -> Self;
+}
+
+impl<T> LogError for Result<T> {
+    fn log_error(self) -> Self {
+        if let Err(e) = &self {
+            e.log_error();
+        }
+        self
+    }
+    fn log_error_msg<S: AsRef<str>, F: FnOnce() -> S>(self, make_msg: F) -> Self {
+        if let Err(e) = &self {
+            e.log_error_msg(make_msg().as_ref())
+        }
+        self
+    }
+}
