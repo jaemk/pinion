@@ -93,22 +93,35 @@ impl User {
 
 #[Object]
 impl User {
+    /// The user ID
     async fn id(&self) -> String {
         self.id.to_string()
     }
+
+    /// The user's human name
     async fn name(&self) -> Option<&String> {
         self.name.as_ref()
     }
 
+    /// The user's chosen handle/username
     async fn handle(&self) -> &str {
         &self.handle
     }
+
+    /// Whether this user still needs to be setup with a handle.
+    /// If this is true, then it means that the account was just
+    /// created and the user needs to set a handle befor being able
+    /// to use the app. Handle can be set using the `setHandle` mutation
     async fn needs_handle(&self) -> bool {
         uuid::Uuid::try_parse(&self.handle).is_ok()
     }
+
+    /// The UTC time at which this user's phone number was last verified.
+    /// This is the last time that a user entered a valid verification code.
     async fn phone_verified(&self) -> Option<DateTime<Utc>> {
         self.phone_verified
     }
+
     async fn group_associations(&self, ctx: &Context<'_>) -> FieldResult<Vec<GroupAssociation>> {
         let r = ctx
             .data_unchecked::<AppLoader>()
@@ -117,6 +130,7 @@ impl User {
             .unwrap_or_default();
         Ok(r)
     }
+
     async fn question_of_day(&self, ctx: &Context<'_>) -> FieldResult<Question> {
         let r = ctx
             .data_unchecked::<AppLoader>()

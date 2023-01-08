@@ -450,6 +450,7 @@ impl MutationRoot {
     }
 
     #[graphql(guard = "LoginGuard::new()")]
+    /// Set/update the handle of the current user
     async fn set_handle(&self, ctx: &Context<'_>, handle: String) -> FieldResult<User> {
         let user = ctx.data_unchecked::<User>();
         let pool = ctx.data_unchecked::<PgPool>();
@@ -491,6 +492,8 @@ impl MutationRoot {
         Ok(user)
     }
 
+    /// Complete the login flow by sending the current user's phone number and
+    /// the verification code that was received
     async fn login_phone_confirm(
         &self,
         ctx: &Context<'_>,
@@ -544,7 +547,13 @@ impl MutationRoot {
         })
     }
 
-    async fn login_phone(&self, ctx: &Context<'_>, phone_number: String) -> FieldResult<bool> {
+    /// Initiate the verification flow by sending the phone number
+    /// of the user's current device
+    async fn login_phone(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The phone number of the device to login with")] phone_number: String,
+    ) -> FieldResult<bool> {
         let pool = ctx.data_unchecked::<PgPool>();
         let mut tr = pool
             .begin()
