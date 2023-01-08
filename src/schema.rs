@@ -2,7 +2,7 @@ use crate::crypto::{b64_encode, encrypt};
 use crate::models::{
     BaseUser, ChallengePhone, LoginSuccess, Phone, Pinion, User, VerificationCode,
 };
-use crate::{AppError, Result, CONFIG};
+use crate::{error::LogError, AppError, Result, CONFIG};
 use async_graphql::{
     Context, EmptySubscription, ErrorExtensions, FieldResult, Guard, Object, ResultExt,
 };
@@ -268,7 +268,7 @@ async fn _verify_code_for_user(
     .await
     .map_err(AppError::from)?;
     if latest_code.is_none() {
-        return Err(AppError::BadRequest("invalid code".into()));
+        return Err(AppError::InvalidVerificationCode("invalid code".into()));
     }
     let latest_code = latest_code.unwrap();
     if latest_code.created
@@ -278,7 +278,7 @@ async fn _verify_code_for_user(
             ))
             .expect("error calculating challenge phone offset")
     {
-        return Err(AppError::BadRequest("invalid code".into()));
+        return Err(AppError::InvalidVerificationCode("invalid code".into()));
     }
     let saved_hash = hex::decode(&latest_code.hash)?;
     let this_hash = crate::crypto::derive_password_hash(
@@ -286,7 +286,7 @@ async fn _verify_code_for_user(
         hex::decode(&latest_code.salt)?.as_ref(),
     );
     if ring::constant_time::verify_slices_are_equal(&saved_hash, &this_hash).is_err() {
-        return Err(AppError::BadRequest("invalid code".into()));
+        return Err(AppError::InvalidVerificationCode("invalid code".into()));
     }
 
     sqlx::query(
@@ -502,6 +502,7 @@ impl MutationRoot {
             .begin()
             .await
             .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
             .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
 
         let phone_number = phone_number.or_else(|| {
@@ -510,30 +511,30 @@ impl MutationRoot {
         });
         let phone_number = match phone_number {
             None => {
-                tracing::error!("no phone number provided or found while verifying code");
-                return Err(AppError::from("no phone number provided or found"))
-                    .extend_err(|_e, ex| ex.set("key", "MISSING_PHONE_NUMBER"));
+                return Err(AppError::from(
+                    "no phone number provided or found while verifying code",
+                ))
+                .log_error()
+                .extend_err(|_e, ex| ex.set("key", "MISSING_PHONE_NUMBER"));
             }
             Some(p) => p,
         };
         let user = User::fetch_user_by_number(&mut tr, &phone_number)
             .await
-            .extend_err(|e, ex| {
-                tracing::error!("error {:?}", e);
-                ex.set("key", "DATABASE_ERROR");
-            })?;
+            .log_error_msg(|| "error fetching user by number")
+            .extend()?;
         if user.is_none() {
-            return Err(AppError::BadRequest("bad request".into())
-                .extend()
-                .extend_with(|_e, ex| ex.set("key", "INVALID_CODE")));
+            return Err(AppError::InvalidVerificationCode(
+                "invalid phone number".into(),
+            ))
+            .extend();
         }
         let user = user.unwrap();
+        let user_id = user.id;
         let user = _verify_code_for_user(&mut tr, &user, &code)
             .await
-            .extend_err(|e, ex| {
-                tracing::error!("error {:?}", e);
-                ex.set("key", "INVALID_CODE")
-            })?;
+            .log_error_msg(|| format!("error verifying code for user {user_id}"))
+            .extend()?;
 
         tr.commit().await.map_err(AppError::from).extend()?;
         let token = login_ctx(ctx, &user).await.extend()?;
@@ -545,13 +546,15 @@ impl MutationRoot {
 
     async fn login_phone(&self, ctx: &Context<'_>, phone_number: String) -> FieldResult<bool> {
         let pool = ctx.data_unchecked::<PgPool>();
-        let mut tr = pool.begin().await?;
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
         let user = User::fetch_user_by_number(&mut tr, &phone_number)
             .await
-            .extend_err(|e, ex| {
-                tracing::error!("error {:?}", e);
-                ex.set("key", "DATABASE_ERROR")
-            })?;
+            .log_error_msg(|| "error fetching user by number")?;
         let user = match user {
             Some(user) => user,
             None => {
@@ -565,7 +568,10 @@ impl MutationRoot {
             }
         };
         tr.commit().await.map_err(AppError::from).extend()?;
-        send_verification_code(ctx, &user).await.extend()?;
+        send_verification_code(ctx, &user)
+            .await
+            .log_error_msg(|| "error sending verification code")
+            .extend()?;
         challenge_phone_ctx(ctx, &phone_number).await.extend()?;
         Ok(true)
     }
@@ -587,13 +593,16 @@ impl MutationRoot {
     async fn verify_number(&self, ctx: &Context<'_>, code: String) -> FieldResult<User> {
         let user = ctx.data_unchecked::<User>();
         let pool = ctx.data_unchecked::<PgPool>();
-        let mut tr = pool.begin().await.map_err(AppError::from).extend()?;
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let user_id = user.id;
         let user = _verify_code_for_user(&mut tr, user, &code)
             .await
-            .extend_err(|e, ex| {
-                tracing::error!("error {:?}", e);
-                ex.set("key", "INVALID_CODE")
-            })?;
+            .log_error_msg(|| format!("error verifying code for user {user_id}"))?;
         tr.commit().await.map_err(AppError::from).extend()?;
         Ok(user)
     }
@@ -602,16 +611,24 @@ impl MutationRoot {
     async fn delete_account(&self, ctx: &Context<'_>, code: String) -> FieldResult<bool> {
         let user = ctx.data_unchecked::<User>();
         let pool = ctx.data_unchecked::<PgPool>();
-        let mut tr = pool.begin().await.map_err(AppError::from).extend()?;
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let user_id = user.id;
         let user = _verify_code_for_user(&mut tr, user, &code)
             .await
-            .extend_err(|e, ex| {
-                tracing::error!("error {:?}", e);
-                ex.set("key", "INVALID_CODE")
-            })?;
+            .log_error_msg(|| format!("error verifying code for user {user_id}"))?;
         tr.commit().await.map_err(AppError::from).extend()?;
 
-        let mut tr = pool.begin().await.map_err(AppError::from).extend()?;
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
         sqlx::query(
             r##"
             update pin.phones
@@ -624,10 +641,9 @@ impl MutationRoot {
         .execute(&mut *tr)
         .await
         .map_err(AppError::from)
-        .extend_err(|e, ex| {
-            tracing::error!("error {:?}", e);
-            ex.set("key", "DATABASE_ERROR")
-        })?;
+        .log_error()
+        .extend()?;
+
         sqlx::query(
             r##"
             update pin.users
@@ -640,11 +656,14 @@ impl MutationRoot {
         .execute(&mut *tr)
         .await
         .map_err(AppError::from)
-        .extend_err(|e, ex| {
-            tracing::error!("error {:?}", e);
-            ex.set("key", "DATABASE_ERROR")
-        })?;
-        tr.commit().await.map_err(AppError::from).extend()?;
+        .log_error()
+        .extend()?;
+
+        tr.commit()
+            .await
+            .map_err(AppError::from)
+            .log_error()
+            .extend()?;
         let r = self.logout(ctx).await?;
         Ok(r)
     }
@@ -658,7 +677,12 @@ impl MutationRoot {
     ) -> FieldResult<Pinion> {
         let user = ctx.data_unchecked::<User>();
         let pool = ctx.data_unchecked::<PgPool>();
-        let mut tr = pool.begin().await.map_err(AppError::from).extend()?;
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
         let pinion: Pinion = sqlx::query_as(
             r##"
             insert into pin.pinions
@@ -682,7 +706,11 @@ impl MutationRoot {
                 ex.set("key", "DATABASE_ERROR");
             }
         })?;
-        tr.commit().await.map_err(AppError::from).extend()?;
+        tr.commit()
+            .await
+            .map_err(AppError::from)
+            .log_error()
+            .extend()?;
         Ok(pinion)
     }
 }
