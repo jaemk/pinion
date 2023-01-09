@@ -173,6 +173,19 @@ async fn run() -> Result<()> {
             },
         );
 
+    let graphiql = warp::path!("_" / "graphiql")
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(|| {
+            warp::http::Response::builder()
+                .header("content-type", "text/html")
+                .body(
+                    async_graphql::http::GraphiQLSource::build()
+                        .endpoint("/api/graphql")
+                        .finish(),
+                )
+        });
+
     let index_options = warp::path::end().and(warp::options()).map(warp::reply);
 
     let graphql_options = warp::path!("api" / "graphql")
@@ -188,10 +201,12 @@ async fn run() -> Result<()> {
             "http://localhost:3000",
             "http://localhost:3003",
             "https://api.getpinion.com",
+            "https://getpinion.com",
         ]);
     let routes = index
         .or(index_options)
         .or(graphql_post)
+        .or(graphiql)
         .or(graphql_options)
         .or(favicon)
         .or(status)
