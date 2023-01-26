@@ -1,10 +1,12 @@
+use crate::error::LogError;
 use crate::loaders::{
     AppLoader, GroupAssociationsForUserId, MultiOptionsForQuestion, PinionForQuestion,
     QuestionOfDay, UserId,
 };
 use crate::{AppError, Result};
-use async_graphql::{Context, ErrorExtensions, FieldResult, Object};
+use async_graphql::{Context, ErrorExtensions, FieldResult, Object, ResultExt};
 use chrono::{DateTime, Utc};
+use sqlx::PgPool;
 
 #[derive(Clone)]
 pub struct ChallengePhone {
@@ -295,7 +297,7 @@ impl GroupAssociation {
     }
 }
 
-#[derive(Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Question {
     pub id: i64,
     pub kind: String,
@@ -321,6 +323,45 @@ impl Question {
         .await
         .map_err(AppError::from)?;
         Ok(question)
+    }
+
+    pub async fn get_options(
+        id: i64,
+        tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Vec<QuestionMultiOption>> {
+        let options: Vec<QuestionMultiOption> = sqlx::query_as(
+            r##"select * from pin.question_multi_options where question_id = $1 and deleted is false order by rank"##,
+        ).bind(id)
+            .fetch_all(&mut *tr)
+            .await
+            .map_err(AppError::from)?;
+        Ok(options)
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct QuestionOptionCount {
+    pub multi_selection: i64,
+    pub count: i64,
+}
+impl QuestionOptionCount {
+    pub async fn get_option_counts(
+        question_id: i64,
+        tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Vec<Self>> {
+        let counts: Vec<Self> = sqlx::query_as(
+            r##"
+            select multi_selection, count(*)
+            from pin.pinions
+            where question_id = $1 and deleted is false
+            group by multi_selection
+            "##,
+        )
+        .bind(question_id)
+        .fetch_all(&mut *tr)
+        .await
+        .map_err(AppError::from)?;
+        Ok(counts)
     }
 }
 
@@ -354,58 +395,114 @@ impl Question {
             Ok(Some(r))
         }
     }
-    async fn summary(&self) -> Option<QuestionSummary> {
-        Some(QuestionSummary { id: 1 })
+    async fn summary(&self, ctx: &Context<'_>) -> FieldResult<QuestionSummary> {
+        let pool = ctx.data_unchecked::<PgPool>();
+        question_summary(self.id, pool)
+            .await
+            .log_error_msg(|| "error querying summary")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))
     }
 }
 
-#[derive(Clone, sqlx::FromRow)]
-pub struct QuestionSummary {
-    pub id: i64,
-    // pub question_id: i64,
-    // pub deleted: bool,
-    // pub created: DateTime<Utc>,
-    // pub modified: DateTime<Utc>,
+use cached::proc_macro::cached;
+use cached::TimedSizedCache;
+#[cached(
+    result = true,
+    sync_writes = true,
+    type = "TimedSizedCache<i64, QuestionSummary>",
+    create = "{ TimedSizedCache::with_size_and_lifespan(10, 10) }",
+    convert = r#"{ id }"#
+)]
+async fn question_summary(id: i64, pool: &PgPool) -> Result<QuestionSummary> {
+    tracing::info!("loading question summary for question {}", id);
+    let query = r##"
+        select * from pin.question_multi_option_tallies
+            where
+                deleted is false
+                and question_id = $1
+            order by count asc
+        "##;
+    let res: Vec<QuestionMultiOptionTally> = sqlx::query_as(query)
+        .bind(&id)
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::from)
+        .log_error_msg(|| "error loading question multi option tallies")?;
+    tracing::info!("loaded {} question multi option tallies", res.len());
+    if res.is_empty() {
+        return Ok(QuestionSummary {
+            total_count: 0,
+            options: vec![],
+        });
+    }
+    let total_count = res.iter().map(|ot| ot.count).sum();
+    let options = res
+        .into_iter()
+        .map(|ot| ot.to_option_summary(total_count))
+        .collect::<Vec<_>>();
+    Ok(QuestionSummary {
+        total_count,
+        options,
+    })
 }
 
-struct AnswerPercentage {
+#[derive(Clone, sqlx::FromRow)]
+pub struct QuestionMultiOptionTally {
+    pub id: i64,
+    pub question_id: i64,
+    pub multi_selection: i64,
+    pub count: i64,
+    pub deleted: bool,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+}
+impl QuestionMultiOptionTally {
+    fn to_option_summary(&self, total_answer_count: i64) -> OptionSummary {
+        OptionSummary {
+            option_id: self.multi_selection,
+            count: self.count,
+            percentage: (self.count as f64 / total_answer_count as f64 * 100.).round() as i64,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct QuestionSummary {
+    pub total_count: i64,
+    pub options: Vec<OptionSummary>,
+}
+
+#[Object]
+impl QuestionSummary {
+    async fn total_count(&self) -> i64 {
+        self.total_count
+    }
+    async fn options(&self) -> &[OptionSummary] {
+        &self.options
+    }
+}
+
+#[derive(Clone)]
+pub struct OptionSummary {
     option_id: i64,
-    rank: i64,
+    count: i64,
     percentage: i64,
 }
 
 #[Object]
-impl AnswerPercentage {
-    async fn option_id(&self) -> String {
+impl OptionSummary {
+    async fn id(&self) -> String {
         self.option_id.to_string()
     }
-    async fn rank(&self) -> i64 {
-        self.rank
+    async fn count(&self) -> i64 {
+        self.count
     }
     async fn percentage(&self) -> i64 {
         self.percentage
     }
 }
 
-#[Object]
-impl QuestionSummary {
-    async fn percentages(&self) -> Vec<AnswerPercentage> {
-        vec![
-            AnswerPercentage {
-                option_id: 1,
-                rank: 0,
-                percentage: 99,
-            },
-            AnswerPercentage {
-                option_id: 2,
-                rank: 1,
-                percentage: 1,
-            },
-        ]
-    }
-}
-
-#[derive(Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct QuestionMultiOption {
     pub id: i64,
     pub question_id: i64,

@@ -2,6 +2,7 @@ use async_graphql::{dataloader::HashMapCache, EmptySubscription};
 use async_graphql_warp::GraphQLResponse;
 use sqlx::postgres::PgConnectOptions;
 use sqlx::{ConnectOptions, PgPool};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -15,8 +16,9 @@ mod models;
 mod schema;
 
 use crate::crypto::b64_decode;
+use crate::error::LogError;
 use crate::loaders::QOD_QUERY;
-use crate::models::{ChallengePhone, Question};
+use crate::models::{ChallengePhone, Question, QuestionOptionCount};
 use error::{AppError, Result};
 use loaders::PgLoader;
 use models::User;
@@ -212,6 +214,83 @@ async fn run() -> Result<()> {
         .or(status)
         .with(cors)
         .with(warp::trace::request());
+
+    async fn tally_question_of_the_day(pool: PgPool) {
+        // todo: instead of just sleep, select from either a timer
+        //       or a channel so that other code can trigger a refresh
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let question: Result<Question> = sqlx::query_as(QOD_QUERY)
+                .fetch_one(&pool)
+                .await
+                .map_err(AppError::from)
+                .log_error_msg(|| "background: error loading question of the day");
+            if question.is_err() {
+                continue;
+            }
+            let question = question.unwrap();
+
+            let tr = pool
+                .begin()
+                .await
+                .map_err(AppError::from)
+                .log_error_msg(|| "background: error starting transaction {:?}");
+            if tr.is_err() {
+                continue;
+            }
+            let mut tr = tr.unwrap();
+            let options = Question::get_options(question.id, &mut tr)
+                .await
+                .log_error_msg(|| "background: error getting question options");
+            if options.is_err() {
+                continue;
+            }
+            let options = options.unwrap();
+            let option_counts = QuestionOptionCount::get_option_counts(question.id, &mut tr)
+                .await
+                .log_error_msg(|| "background: error getting option counts");
+            if option_counts.is_err() {
+                continue;
+            }
+            let option_counts = option_counts.unwrap();
+            let option_counts = option_counts
+                .into_iter()
+                .map(|count| (count.multi_selection, count.count))
+                .collect::<HashMap<i64, i64>>();
+            let option_counts = options
+                .into_iter()
+                .map(|opt| (opt.id, option_counts.get(&opt.id).unwrap_or(&0)))
+                .collect::<Vec<_>>();
+            for (multi_selection, count) in option_counts {
+                sqlx::query(
+                    r##"
+                    insert into pin.question_multi_option_tallies
+                    (question_id, multi_selection, count)
+                    values
+                    ($1, $2, $3)
+                    on conflict (question_id, multi_selection) where deleted is false
+                    do update set
+                        count = $3
+                    "##,
+                )
+                .bind(question.id)
+                .bind(multi_selection)
+                .bind(count)
+                .execute(&mut *tr)
+                .await
+                .map_err(AppError::from)
+                .log_error_msg(|| "background: error upserting multi selection count")
+                .ok();
+            }
+            tr.commit()
+                .await
+                .map_err(AppError::from)
+                .log_error_msg(|| "background: error commiting changes")
+                .ok();
+        }
+    }
+
+    tokio::spawn(tally_question_of_the_day(pool.clone()));
 
     async fn set_question_of_the_day(pool: PgPool) {
         loop {

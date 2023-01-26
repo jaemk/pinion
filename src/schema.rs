@@ -1,6 +1,7 @@
 use crate::crypto::{b64_encode, encrypt};
+use crate::loaders::{AppLoader, QuestionOfDay};
 use crate::models::{
-    BaseUser, ChallengePhone, LoginSuccess, Phone, Pinion, User, VerificationCode,
+    BaseUser, ChallengePhone, LoginSuccess, Phone, Pinion, Question, User, VerificationCode,
 };
 use crate::{error::LogError, AppError, Result, CONFIG};
 use async_graphql::{
@@ -536,7 +537,7 @@ impl MutationRoot {
         let user_id = user.id;
         let user = _verify_code_for_user(&mut tr, &user, &code)
             .await
-            .log_error_msg(|| format!("error verifying code for user {user_id}"))
+            .log_error_msg(|| format!("failed verifying code for user {user_id}"))
             .extend()?;
 
         tr.commit().await.map_err(AppError::from).extend()?;
@@ -611,7 +612,7 @@ impl MutationRoot {
         let user_id = user.id;
         let user = _verify_code_for_user(&mut tr, user, &code)
             .await
-            .log_error_msg(|| format!("error verifying code for user {user_id}"))?;
+            .log_error_msg(|| format!("failed verifying code for user {user_id}"))?;
         tr.commit().await.map_err(AppError::from).extend()?;
         Ok(user)
     }
@@ -629,7 +630,7 @@ impl MutationRoot {
         let user_id = user.id;
         let user = _verify_code_for_user(&mut tr, user, &code)
             .await
-            .log_error_msg(|| format!("error verifying code for user {user_id}"))?;
+            .log_error_msg(|| format!("failed verifying code for user {user_id}"))?;
         tr.commit().await.map_err(AppError::from).extend()?;
 
         let mut tr = pool
@@ -732,6 +733,16 @@ impl QueryRoot {
     async fn user(&self, ctx: &Context<'_>) -> Option<User> {
         let u = ctx.data_opt::<User>();
         u.cloned()
+    }
+
+    #[graphql(guard = "LoginGuard::new()")]
+    async fn question_of_day(&self, ctx: &Context<'_>) -> FieldResult<Question> {
+        let r = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(QuestionOfDay {})
+            .await?
+            .unwrap();
+        Ok(r)
     }
 }
 
