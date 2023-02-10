@@ -173,7 +173,7 @@ impl async_graphql::dataloader::Loader<MultiOptionsForQuestion> for PgLoader {
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
-pub struct PinionForQuestion(pub i64);
+pub struct PinionForQuestion(pub i64, pub i64);
 
 #[async_trait::async_trait]
 impl async_graphql::dataloader::Loader<PinionForQuestion> for PgLoader {
@@ -189,11 +189,14 @@ impl async_graphql::dataloader::Loader<PinionForQuestion> for PgLoader {
         select * from pin.pinions
             where
                 deleted is false and
-                question_id in (select * from unnest($1))
+                question_id in (select * from unnest($1)) and
+                user_id in (select * from unnest($2))
         "##;
-        let keys = keys.iter().map(|ga| ga.0).collect::<Vec<_>>();
+        let q_ids = keys.iter().map(|ga| ga.0).collect::<Vec<_>>();
+        let user_ids = keys.iter().map(|ga| ga.1).collect::<Vec<_>>();
         let res: Vec<Pinion> = sqlx::query_as(query)
-            .bind(&keys)
+            .bind(&q_ids)
+            .bind(&user_ids)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -202,7 +205,7 @@ impl async_graphql::dataloader::Loader<PinionForQuestion> for PgLoader {
             })?;
         tracing::info!("loaded {} pinions", res.len());
         let res = res.into_iter().fold(HashMap::new(), |mut acc, pin| {
-            acc.insert(PinionForQuestion(pin.question_id), pin);
+            acc.insert(PinionForQuestion(pin.question_id, pin.user_id), pin);
             acc
         });
         Ok(res)

@@ -373,16 +373,23 @@ impl Question {
     async fn kind(&self) -> String {
         self.kind.clone()
     }
+
+    /// Question prompt
     async fn prompt(&self) -> String {
         self.prompt.clone()
     }
+
+    /// The current user's response to this question
     async fn pinion(&self, ctx: &Context<'_>) -> FieldResult<Option<Pinion>> {
+        let u = ctx.data_opt::<User>().expect("no current user");
         let r = ctx
             .data_unchecked::<AppLoader>()
-            .load_one(PinionForQuestion(self.id))
+            .load_one(PinionForQuestion(self.id, u.id))
             .await?;
         Ok(r)
     }
+
+    /// List of answer options
     async fn options(&self, ctx: &Context<'_>) -> FieldResult<Option<Vec<QuestionMultiOption>>> {
         if self.kind != "multi" {
             Ok(None)
@@ -395,6 +402,8 @@ impl Question {
             Ok(Some(r))
         }
     }
+
+    /// A summary of responses (counts and percentages)
     async fn summary(&self, ctx: &Context<'_>) -> FieldResult<QuestionSummary> {
         let pool = ctx.data_unchecked::<PgPool>();
         question_summary(self.id, pool)
@@ -491,12 +500,15 @@ pub struct OptionSummary {
 
 #[Object]
 impl OptionSummary {
+    /// The identifier of the option associated with the question
     async fn id(&self) -> String {
         self.option_id.to_string()
     }
+    /// Total count for this option
     async fn count(&self) -> i64 {
         self.count
     }
+    /// Percentage of responses that chose this option
     async fn percentage(&self) -> i64 {
         self.percentage
     }
