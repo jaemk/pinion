@@ -429,6 +429,9 @@ pub struct MutationRoot;
 
 #[Object]
 impl MutationRoot {
+    /// Initiate the signup flow by providing both phone and user handle up front.
+    /// Use login_phone do initiate both the signup and login flow without specifying
+    /// a user handle
     async fn sign_up(
         &self,
         ctx: &Context<'_>,
@@ -548,8 +551,8 @@ impl MutationRoot {
         })
     }
 
-    /// Initiate the verification flow by sending the phone number
-    /// of the user's current device
+    /// Initiate the verification flow for signup or login by sending the phone number
+    /// of the user's current device without providing a user handle
     async fn login_phone(
         &self,
         ctx: &Context<'_>,
@@ -586,13 +589,16 @@ impl MutationRoot {
         Ok(true)
     }
 
+    /// Remove the current authentication cookie
     async fn logout(&self, ctx: &Context<'_>) -> bool {
+        // todo: mark pin.auth_tokens deleted for current user
         let cookie_str = format_set_auth_cookie(&generate_clear_token());
         ctx.append_http_header("set-cookie", cookie_str);
         true
     }
 
     #[graphql(guard = "LoginNeedsVerificationGuard::new()")]
+    /// Initiate phone verification. This will send a text to the current user's phone number
     async fn send_verification_code(&self, ctx: &Context<'_>) -> FieldResult<User> {
         let user = ctx.data_unchecked::<User>();
         send_verification_code(ctx, user).await.extend()?;
@@ -600,6 +606,7 @@ impl MutationRoot {
     }
 
     #[graphql(guard = "LoginNeedsVerificationGuard::new()")]
+    /// Send a valid verification code to verify the current user's phone number
     async fn verify_number(&self, ctx: &Context<'_>, code: String) -> FieldResult<User> {
         let user = ctx.data_unchecked::<User>();
         let pool = ctx.data_unchecked::<PgPool>();
@@ -618,6 +625,8 @@ impl MutationRoot {
     }
 
     #[graphql(guard = "LoginGuard::new()")]
+    /// Decom the current account. This requires passing a valid verification code initiated
+    /// by send_verification_code
     async fn delete_account(&self, ctx: &Context<'_>, code: String) -> FieldResult<bool> {
         let user = ctx.data_unchecked::<User>();
         let pool = ctx.data_unchecked::<PgPool>();
@@ -679,6 +688,7 @@ impl MutationRoot {
     }
 
     #[graphql(guard = "LoginGuard::new()")]
+    /// Submit an opinion for a specific question_id
     async fn opine(
         &self,
         ctx: &Context<'_>,
@@ -730,12 +740,14 @@ pub struct QueryRoot;
 #[Object]
 impl QueryRoot {
     #[graphql(guard = "LoginGuard::new()")]
+    /// Retrieve the currently authenticated user
     async fn user(&self, ctx: &Context<'_>) -> Option<User> {
         let u = ctx.data_opt::<User>();
         u.cloned()
     }
 
     #[graphql(guard = "LoginGuard::new()")]
+    /// Retrieve the question of the day
     async fn question_of_day(&self, ctx: &Context<'_>) -> FieldResult<Question> {
         let r = ctx
             .data_unchecked::<AppLoader>()
