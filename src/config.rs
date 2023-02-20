@@ -84,8 +84,8 @@ impl Config {
             db_max_connections: env_or("DATABASE_MAX_CONNECTIONS", "5")
                 .parse()
                 .expect("invalid DATABASE_MAX_CONNECTIONS"),
-            // 60 * 60 * 24 * 30
-            auth_expiration_seconds: env_or("AUTH_EXPIRATION_SECONDS", "2592000")
+            // 60 * 60 * 24 * 180
+            auth_expiration_seconds: env_or("AUTH_EXPIRATION_SECONDS", "15552000")
                 .parse()
                 .expect("invalid auth_expiration_seconds"),
             // 60 * 2
