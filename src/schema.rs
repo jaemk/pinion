@@ -703,6 +703,18 @@ impl MutationRoot {
             .map_err(AppError::from)
             .log_error_msg(|| "error starting transaction")
             .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let q_id = question_id.parse::<i64>()?;
+        sqlx::query(
+            r##"update pin.pinions set deleted = true where user_id = $1 and question_id = $2"##,
+        )
+        .bind(user.id)
+        .bind(q_id)
+        .execute(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|e, ex| {
+            ex.set("key", "DATABASE_ERROR");
+        })?;
         let pinion: Pinion = sqlx::query_as(
             r##"
             insert into pin.pinions
@@ -712,7 +724,7 @@ impl MutationRoot {
         "##,
         )
         .bind(user.id)
-        .bind(question_id.parse::<i64>()?)
+        .bind(q_id)
         .bind(multi_selection_id.parse::<i64>()?)
         .fetch_one(&mut *tr)
         .await
