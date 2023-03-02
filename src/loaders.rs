@@ -1,4 +1,6 @@
-use crate::models::{GroupAssociation, Pinion, Question, QuestionMultiOption, User};
+use crate::models::{
+    Friend, GroupAssociation, Pinion, Profile, Question, QuestionMultiOption, User,
+};
 use crate::AppError;
 use async_graphql::dataloader::{DataLoader, HashMapCache};
 use sqlx::PgPool;
@@ -40,10 +42,48 @@ impl async_graphql::dataloader::Loader<UserId> for PgLoader {
             .bind(&u_ids)
             .fetch_all(&self.pool)
             .await
-            .map_err(AppError::from)?;
+            .map_err(|e| {
+                tracing::error!("error loading users: {:?}", e);
+                AppError::from(e)
+            })?;
         tracing::info!("loaded {} users", res.len());
         let res = res.into_iter().fold(HashMap::new(), |mut acc, u| {
             acc.insert(UserId(u.id), u);
+            acc
+        });
+        Ok(res)
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct ProfileForUserId(pub i64);
+
+#[async_trait::async_trait]
+impl async_graphql::dataloader::Loader<ProfileForUserId> for PgLoader {
+    type Value = Profile;
+    type Error = std::sync::Arc<AppError>;
+
+    async fn load(
+        &self,
+        keys: &[ProfileForUserId],
+    ) -> std::result::Result<HashMap<ProfileForUserId, Self::Value>, Self::Error> {
+        tracing::info!("loading {} profiles", keys.len());
+        let query = r##"
+            select * from pin.profiles
+            where user_id in (select * from unnest($1))
+        "##;
+        let u_ids = keys.iter().map(|c| c.0).collect::<Vec<_>>();
+        let res: Vec<Profile> = sqlx::query_as(query)
+            .bind(&u_ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("error loading profiles: {:?}", e);
+                AppError::from(e)
+            })?;
+        tracing::info!("loaded {} profiles", res.len());
+        let res = res.into_iter().fold(HashMap::new(), |mut acc, p| {
+            acc.insert(ProfileForUserId(p.user_id), p);
             acc
         });
         Ok(res)
@@ -83,6 +123,52 @@ impl async_graphql::dataloader::Loader<GroupAssociationsForUserId> for PgLoader 
                     .entry(GroupAssociationsForUserId(ga.user_id))
                     .or_insert_with(Vec::new);
                 e.push(ga);
+            }
+            acc
+        });
+        Ok(res)
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct FriendsForUserId(pub i64);
+
+#[async_trait::async_trait]
+impl async_graphql::dataloader::Loader<FriendsForUserId> for PgLoader {
+    type Value = Vec<Friend>;
+    type Error = std::sync::Arc<AppError>;
+
+    async fn load(
+        &self,
+        keys: &[FriendsForUserId],
+    ) -> std::result::Result<HashMap<FriendsForUserId, Self::Value>, Self::Error> {
+        tracing::info!("loading friends for {} users", keys.len());
+        let query = r##"
+            select * from pin.friends
+            where requestor_id in (select * from unnest($1))
+                or acceptor_id in (select * from unnest($1))
+                and deleted is false;
+        "##;
+        let keys = keys.iter().map(|u| u.0).collect::<Vec<_>>();
+        let res: Vec<Friend> = sqlx::query_as(query)
+            .bind(&keys)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AppError::from)?;
+        tracing::info!("loaded {} friends", res.len());
+        let res = res.into_iter().fold(HashMap::new(), |mut acc, f| {
+            {
+                // Need to push both sides because we don't know who is "asking"
+                // When we the dataloader iterators over the input keys, both "sides"
+                // of the friendship will be available to pull.
+                let e = acc
+                    .entry(FriendsForUserId(f.requestor_id))
+                    .or_insert_with(Vec::new);
+                e.push(f.clone());
+                let e = acc
+                    .entry(FriendsForUserId(f.acceptor_id))
+                    .or_insert_with(Vec::new);
+                e.push(f);
             }
             acc
         });

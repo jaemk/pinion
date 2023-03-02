@@ -1,7 +1,7 @@
 use crate::crypto::{b64_encode, encrypt};
 use crate::loaders::{AppLoader, QuestionOfDay};
 use crate::models::{
-    BaseUser, ChallengePhone, LoginSuccess, Phone, Pinion, Question, User, VerificationCode,
+    BaseUser, ChallengePhone, Friend, LoginSuccess, Phone, Pinion, Question, User, VerificationCode,
 };
 use crate::{error::LogError, AppError, Result, CONFIG};
 use async_graphql::{
@@ -87,7 +87,7 @@ fn format_set_challenge_phone_cookie(token: &str) -> String {
 async fn challenge_phone_ctx(ctx: &Context<'_>, phone_number: &str) -> Result<()> {
     let phone_enc = encrypt(phone_number)?;
     let phone_json = serde_json::to_string(&phone_enc)?;
-    let s = b64_encode(&phone_json);
+    let s = b64_encode(phone_json);
     let cookie_str = format_set_challenge_phone_cookie(&s);
     ctx.append_http_header("set-cookie", cookie_str);
     Ok(())
@@ -712,7 +712,7 @@ impl MutationRoot {
         .execute(&mut *tr)
         .await
         .map_err(AppError::from)
-        .extend_err(|e, ex| {
+        .extend_err(|_e, ex| {
             ex.set("key", "DATABASE_ERROR");
         })?;
         let pinion: Pinion = sqlx::query_as(
@@ -744,6 +744,144 @@ impl MutationRoot {
             .log_error()
             .extend()?;
         Ok(pinion)
+    }
+
+    #[graphql(guard = "LoginGuard::new()")]
+    /// Accept a friend request
+    async fn accept_fiend(
+        &self,
+        ctx: &Context<'_>,
+        relationship_id: String,
+    ) -> FieldResult<Friend> {
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let relationship_id = relationship_id.parse::<i64>()?;
+        let f: Friend = sqlx::query_as(
+            r#"
+            update pin.friends
+                set accepted = now()
+                where id = $1
+                and deleted is false
+            "#,
+        )
+        .bind(relationship_id)
+        .fetch_one(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend()?;
+        tr.commit()
+            .await
+            .map_err(AppError::from)
+            .log_error()
+            .extend()?;
+        Ok(f)
+    }
+
+    #[graphql(guard = "LoginGuard::new()")]
+    /// Request a friendship
+    async fn request_friend(&self, ctx: &Context<'_>, phone_number: String) -> FieldResult<Friend> {
+        let user = ctx.data_unchecked::<User>();
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let other_user = User::fetch_user_by_number(&mut tr, &phone_number)
+            .await
+            .log_error_msg(|| "error querying other user by phone number")
+            .extend()?
+            .ok_or_else(|| AppError::from("unable to find other user by phone number"))
+            .extend()?;
+        let f: Friend = sqlx::query_as(
+            r#"
+            insert into pin.friends
+                (requestor_id, acceptor_id)
+                values ($1, $2)
+                returning *
+            "#,
+        )
+        .bind(user.id)
+        .bind(other_user.id)
+        .fetch_one(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|e, ex| {
+            if let Some((_code, _constraint)) = e.unique_constraint_error() {
+                tracing::info!(
+                    "{}:{} friend relationship already exists",
+                    &user.handle,
+                    &other_user.handle
+                );
+                ex.set("key", "DUPLICATE_FRIEND_REQUEST");
+            } else {
+                tracing::error!("error creating friend relationship {:?}", e);
+                ex.set("key", "DATABASE_ERROR");
+            }
+        })?;
+        tr.commit()
+            .await
+            .map_err(AppError::from)
+            .log_error()
+            .extend()?;
+        Ok(f)
+    }
+
+    #[graphql(guard = "LoginGuard::new()")]
+    /// Terminate a friendship
+    async fn delete_fiend(
+        &self,
+        ctx: &Context<'_>,
+        relationship_id: String,
+    ) -> FieldResult<Friend> {
+        let user = ctx.data_unchecked::<User>();
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let relationship_id = relationship_id.parse::<i64>()?;
+        let f: Friend = sqlx::query_as(
+            r#"
+            select * from pin.friends where id = $1 and deleted is false
+            "#,
+        )
+        .bind(relationship_id)
+        .fetch_one(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend()?;
+        if user.id != f.requestor_id && user.id != f.acceptor_id {
+            return Err(AppError::BadRequest("User not related to friendship".into()).extend());
+        }
+
+        let f: Friend = sqlx::query_as(
+            r#"
+            update pin.friends
+                set deleted = true
+                where id = $1
+                and deleted is false
+            "#,
+        )
+        .bind(relationship_id)
+        .fetch_one(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend()?;
+        tr.commit()
+            .await
+            .map_err(AppError::from)
+            .log_error()
+            .extend()?;
+        Ok(f)
     }
 }
 

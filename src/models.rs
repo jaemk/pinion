@@ -1,7 +1,7 @@
 use crate::error::LogError;
 use crate::loaders::{
-    AppLoader, GroupAssociationsForUserId, MultiOptionsForQuestion, PinionForQuestion,
-    QuestionOfDay, UserId,
+    AppLoader, FriendsForUserId, GroupAssociationsForUserId, MultiOptionsForQuestion,
+    PinionForQuestion, ProfileForUserId, QuestionOfDay, UserId,
 };
 use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object, ResultExt};
@@ -24,7 +24,6 @@ pub struct BaseUser {
 #[derive(Clone, sqlx::FromRow)]
 pub struct User {
     pub id: i64,
-    pub name: Option<String>,
     pub handle: String,
     pub phone_number: String,
     pub phone_verified: Option<DateTime<Utc>>,
@@ -100,9 +99,23 @@ impl User {
         self.id.to_string()
     }
 
-    /// The user's human name
-    async fn name(&self) -> Option<&String> {
-        self.name.as_ref()
+    /// The user's human name, prefer loading user.profile.name
+    async fn name(&self, ctx: &Context<'_>) -> FieldResult<Option<String>> {
+        let u = ctx.data_opt::<User>().expect("no current user");
+        let p = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(ProfileForUserId(u.id))
+            .await?;
+        Ok(p.and_then(|p| p.name))
+    }
+
+    async fn profile(&self, ctx: &Context<'_>) -> FieldResult<Option<Profile>> {
+        let u = ctx.data_opt::<User>().expect("no current user");
+        let p = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(ProfileForUserId(u.id))
+            .await?;
+        Ok(p)
     }
 
     /// The user's chosen handle/username
@@ -122,6 +135,15 @@ impl User {
     /// This is the last time that a user entered a valid verification code.
     async fn phone_verified(&self) -> Option<DateTime<Utc>> {
         self.phone_verified
+    }
+
+    async fn friends(&self, ctx: &Context<'_>) -> FieldResult<Vec<Friend>> {
+        let r = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(FriendsForUserId(self.id))
+            .await?
+            .unwrap_or_default();
+        Ok(r)
     }
 
     async fn group_associations(&self, ctx: &Context<'_>) -> FieldResult<Vec<GroupAssociation>> {
@@ -154,6 +176,7 @@ pub struct SimpleUser {
     pub id: i64,
     pub handle: String,
 }
+
 impl From<User> for SimpleUser {
     fn from(u: User) -> Self {
         Self {
@@ -162,6 +185,7 @@ impl From<User> for SimpleUser {
         }
     }
 }
+
 #[Object]
 impl SimpleUser {
     async fn id(&self) -> String {
@@ -172,11 +196,83 @@ impl SimpleUser {
     }
 }
 
+#[derive(Clone, sqlx::FromRow)]
+pub struct FriendUser {
+    pub id: i64,
+    pub handle: String,
+    pub phone_number: String,
+}
+
+impl From<User> for FriendUser {
+    fn from(u: User) -> Self {
+        Self {
+            id: u.id,
+            handle: u.handle,
+            phone_number: u.phone_number,
+        }
+    }
+}
+
+#[Object]
+impl FriendUser {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    /// The user's human name, prefer loading user.profile.name
+    async fn name(&self, ctx: &Context<'_>) -> FieldResult<Option<String>> {
+        let u = ctx.data_opt::<User>().expect("no current user");
+        let p = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(ProfileForUserId(u.id))
+            .await?;
+        Ok(p.and_then(|p| p.name))
+    }
+
+    async fn profile(&self, ctx: &Context<'_>) -> FieldResult<Option<Profile>> {
+        let u = ctx.data_opt::<User>().expect("no current user");
+        let p = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(ProfileForUserId(u.id))
+            .await?;
+        Ok(p)
+    }
+    async fn handle(&self) -> &str {
+        &self.handle
+    }
+    async fn phone_number(&self) -> &str {
+        &self.phone_number
+    }
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub struct Profile {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: Option<String>,
+    pub deleted: bool,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+}
+#[Object]
+impl Profile {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+    async fn user_id(&self) -> String {
+        self.id.to_string()
+    }
+    async fn name(&self) -> &Option<String> {
+        &self.name
+    }
+}
+
 #[derive(Clone)]
 pub struct LoginSuccess {
     pub auth_token: String,
     pub user: User,
 }
+
 #[Object]
 impl LoginSuccess {
     async fn auth_token(&self) -> String {
@@ -216,6 +312,48 @@ impl Phone {
     }
     async fn number(&self) -> &str {
         &self.number
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Friend {
+    pub id: i64,
+    pub requestor_id: i64,
+    pub acceptor_id: i64,
+    pub accepted: Option<DateTime<Utc>>,
+    pub deleted: bool,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+}
+
+#[Object]
+impl Friend {
+    async fn relationship_id(&self) -> String {
+        self.id.to_string()
+    }
+    async fn accepted(&self) -> Option<DateTime<Utc>> {
+        self.accepted
+    }
+    async fn user(&self, ctx: &Context<'_>) -> FieldResult<FriendUser> {
+        let u = ctx.data_opt::<User>().expect("no current user");
+        let other_user_id = if self.acceptor_id != u.id {
+            self.acceptor_id
+        } else {
+            self.requestor_id
+        };
+        let r = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(UserId(other_user_id))
+            .await?
+            .ok_or_else(|| {
+                AppError::E(format!(
+                    "missing expected friend user {} of user {}",
+                    other_user_id, u.id
+                ))
+                .extend()
+            })?
+            .into();
+        Ok(r)
     }
 }
 
@@ -308,6 +446,7 @@ pub struct Question {
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
 }
+
 impl Question {
     pub async fn mark_used(
         id: i64,
@@ -344,6 +483,7 @@ pub struct QuestionOptionCount {
     pub multi_selection: i64,
     pub count: i64,
 }
+
 impl QuestionOptionCount {
     pub async fn get_option_counts(
         question_id: i64,
@@ -415,6 +555,7 @@ impl Question {
 
 use cached::proc_macro::cached;
 use cached::TimedSizedCache;
+
 #[cached(
     result = true,
     sync_writes = true,
@@ -432,7 +573,7 @@ async fn question_summary(id: i64, pool: &PgPool) -> Result<QuestionSummary> {
             order by count asc
         "##;
     let res: Vec<QuestionMultiOptionTally> = sqlx::query_as(query)
-        .bind(&id)
+        .bind(id)
         .fetch_all(pool)
         .await
         .map_err(AppError::from)
@@ -455,6 +596,38 @@ async fn question_summary(id: i64, pool: &PgPool) -> Result<QuestionSummary> {
     })
 }
 
+#[cached(
+    result = true,
+    sync_writes = true,
+    type = "TimedSizedCache<(i64, i64), QuestionSummary>",
+    create = "{ TimedSizedCache::with_size_and_lifespan(10, 10) }",
+    convert = r#"{ (id, user_id) }"#
+)]
+async fn question_friends_summary(
+    id: i64,
+    user_id: i64,
+    _pool: &PgPool,
+) -> Result<QuestionSummary> {
+    tracing::info!(
+        "loading friend question summary for question {} user {}",
+        id,
+        user_id
+    );
+    todo!();
+    struct Row;
+    // select friends;
+    // todo: combine queries
+
+    // select q.id, q.prompt
+    // from pin.questions q
+    //  inner join pin.question_multi_options qo on q.id = qo.question_id
+    //  left outer join pin.pinions p on q.id = p.question_id
+    // where q.id = $1
+    //  and p.user_id in $2
+
+    // sum
+}
+
 #[derive(Clone, sqlx::FromRow)]
 pub struct QuestionMultiOptionTally {
     pub id: i64,
@@ -465,6 +638,7 @@ pub struct QuestionMultiOptionTally {
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
 }
+
 impl QuestionMultiOptionTally {
     fn to_option_summary(&self, total_answer_count: i64) -> OptionSummary {
         OptionSummary {

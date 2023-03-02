@@ -122,7 +122,7 @@ impl ErrorExtensions for AppError {
                 #[allow(unused_variables)]
                 AppError::DBUniqueContraintViolation { code, constraint } => {
                     e.set("code", 500);
-                    e.set("key", "CONSTRAINT");
+                    e.set("key", "UNIQUE_CONSTRAINT");
                 }
                 AppError::Unverified(s) => {
                     e.set("code", 401);
