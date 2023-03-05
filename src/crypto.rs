@@ -180,7 +180,7 @@ pub fn encrypt_with_key(s: &str, key: &str) -> crate::Result<Enc> {
     let b = encrypt_bytes(s.as_bytes(), &nonce, key.as_bytes(), &salt)
         .map_err(|_| "encryption error")?;
 
-    let value = b64_encode(&b);
+    let value = b64_encode(b);
     let nonce = b64_encode(&nonce);
     let salt = b64_encode(&salt);
     Ok(Enc { value, nonce, salt })
