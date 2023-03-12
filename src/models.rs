@@ -7,6 +7,7 @@ use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object, ResultExt};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct ChallengePhone {
@@ -33,6 +34,7 @@ pub struct User {
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
 }
+
 impl User {
     pub async fn fetch_user(
         tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -254,6 +256,7 @@ pub struct Profile {
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
 }
+
 #[Object]
 impl Profile {
     async fn id(&self) -> String {
@@ -503,6 +506,33 @@ impl QuestionOptionCount {
         .map_err(AppError::from)?;
         Ok(counts)
     }
+    pub async fn get_option_counts_friends(
+        question_id: i64,
+        user_id: i64,
+        tr: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Vec<Self>> {
+        let counts: Vec<Self> = sqlx::query_as(
+            r##"
+            select p.multi_selection, count(distinct (p.id, p.user_id))
+            from pin.pinions p
+                inner join pin.friends f
+                    on p.user_id = f.requestor_id
+                    or p.user_id = f.acceptor_id
+            where
+                 p.question_id = $1
+                 and (f.requestor_id = $2 or f.acceptor_id = $2)
+                 and p.deleted is false
+                 and f.deleted is false
+            group by p.multi_selection
+            "##,
+        )
+        .bind(question_id)
+        .bind(user_id)
+        .fetch_all(&mut *tr)
+        .await
+        .map_err(AppError::from)?;
+        Ok(counts)
+    }
 }
 
 #[Object]
@@ -550,6 +580,21 @@ impl Question {
             .await
             .log_error_msg(|| "error querying summary")
             .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))
+    }
+
+    /// A summary of friends responses (counts and percentages)
+    async fn friend_summary(&self, ctx: &Context<'_>) -> FieldResult<QuestionSummary> {
+        let u = ctx.data_opt::<User>().expect("no current user");
+        let pool = ctx.data_unchecked::<PgPool>();
+        question_friends_summary(self.id, u.id, pool)
+            .await
+            .log_error_msg(|| "error querying summary")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))
+    }
+
+    /// Load pinions of friends for this question
+    async fn friend_pinions(&self, _ctx: &Context<'_>) -> FieldResult<Vec<FriendPinion>> {
+        todo!()
     }
 }
 
@@ -603,29 +648,54 @@ async fn question_summary(id: i64, pool: &PgPool) -> Result<QuestionSummary> {
     create = "{ TimedSizedCache::with_size_and_lifespan(10, 10) }",
     convert = r#"{ (id, user_id) }"#
 )]
-async fn question_friends_summary(
-    id: i64,
-    user_id: i64,
-    _pool: &PgPool,
-) -> Result<QuestionSummary> {
+async fn question_friends_summary(id: i64, user_id: i64, pool: &PgPool) -> Result<QuestionSummary> {
     tracing::info!(
         "loading friend question summary for question {} user {}",
         id,
         user_id
     );
-    todo!();
-    struct Row;
-    // select friends;
-    // todo: combine queries
+    let mut tr = pool
+        .begin()
+        .await
+        .map_err(AppError::from)
+        .log_error_msg(|| "friends: error starting transaction {:?}")?;
+    let options = Question::get_options(id, &mut tr)
+        .await
+        .log_error_msg(|| "friends: error getting question options")?;
+    let option_counts = QuestionOptionCount::get_option_counts_friends(id, user_id, &mut tr)
+        .await
+        .log_error_msg(|| "friends: error getting option counts")?;
+    let option_counts = option_counts
+        .into_iter()
+        .map(|count| (count.multi_selection, count.count))
+        .collect::<HashMap<i64, i64>>();
 
-    // select q.id, q.prompt
-    // from pin.questions q
-    //  inner join pin.question_multi_options qo on q.id = qo.question_id
-    //  left outer join pin.pinions p on q.id = p.question_id
-    // where q.id = $1
-    //  and p.user_id in $2
-
-    // sum
+    let mut total_count = 0;
+    let mut option_tallies = vec![];
+    for opt in options.into_iter() {
+        let count = option_counts.get(&opt.id).unwrap_or(&0);
+        total_count += count;
+        option_tallies.push(QuestionMultiOptionTally {
+            id: 0,
+            question_id: id,
+            multi_selection: opt.id,
+            count: *count,
+            deleted: false,
+        });
+    }
+    let option_summaries = option_tallies
+        .into_iter()
+        .map(|opt| opt.to_option_summary(total_count))
+        .collect::<Vec<_>>();
+    tr.commit()
+        .await
+        .map_err(AppError::from)
+        .log_error_msg(|| "friends: error committing changes")?;
+    let res = QuestionSummary {
+        total_count,
+        options: option_summaries,
+    };
+    Ok(res)
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -635,8 +705,6 @@ pub struct QuestionMultiOptionTally {
     pub multi_selection: i64,
     pub count: i64,
     pub deleted: bool,
-    pub created: DateTime<Utc>,
-    pub modified: DateTime<Utc>,
 }
 
 impl QuestionMultiOptionTally {
@@ -730,6 +798,33 @@ pub struct Pinion {
 impl Pinion {
     async fn id(&self) -> String {
         self.id.to_string()
+    }
+    async fn question_id(&self) -> String {
+        self.question_id.to_string()
+    }
+    async fn multi_selection_id(&self) -> String {
+        self.multi_selection.to_string()
+    }
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub struct FriendPinion {
+    pub id: i64,
+    pub user_id: i64,
+    pub question_id: i64,
+    pub multi_selection: i64,
+    pub deleted: bool,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+}
+
+#[Object]
+impl FriendPinion {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+    async fn user(&self) -> FriendUser {
+        todo!();
     }
     async fn question_id(&self) -> String {
         self.question_id.to_string()
