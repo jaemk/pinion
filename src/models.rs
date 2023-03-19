@@ -1,7 +1,7 @@
 use crate::error::LogError;
 use crate::loaders::{
     AppLoader, FriendsForUserId, GroupAssociationsForUserId, MultiOptionsForQuestion,
-    PinionForQuestion, ProfileForUserId, QuestionOfDay, UserId,
+    PinionForQuestion, PinionsOfFriendsForUserQuestionId, ProfileForUserId, QuestionOfDay, UserId,
 };
 use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object, ResultExt};
@@ -593,8 +593,19 @@ impl Question {
     }
 
     /// Load pinions of friends for this question
-    async fn friend_pinions(&self, _ctx: &Context<'_>) -> FieldResult<Vec<FriendPinion>> {
-        todo!()
+    async fn friend_pinions(&self, ctx: &Context<'_>) -> FieldResult<Vec<FriendPinion>> {
+        let u = ctx.data_opt::<User>().expect("no current user");
+        ctx.data_unchecked::<AppLoader>()
+            .load_one(PinionsOfFriendsForUserQuestionId(u.id, self.id))
+            .await?
+            .map(|ps| ps.into_iter().map(FriendPinion::from).collect())
+            .ok_or_else(|| {
+                AppError::from(format!(
+                    "unable to load pinions of friends for user {}, q {}",
+                    u.id, self.id
+                ))
+            })
+            .extend()
     }
 }
 
@@ -784,6 +795,19 @@ impl QuestionMultiOption {
 }
 
 #[derive(Clone, sqlx::FromRow)]
+pub struct PinionWithFriendRelation {
+    pub id: i64,
+    pub user_id: i64,
+    pub requestor_id: i64,
+    pub acceptor_id: i64,
+    pub question_id: i64,
+    pub multi_selection: i64,
+    pub deleted: bool,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+}
+
+#[derive(Clone, sqlx::FromRow)]
 pub struct Pinion {
     pub id: i64,
     pub user_id: i64,
@@ -792,6 +816,20 @@ pub struct Pinion {
     pub deleted: bool,
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
+}
+
+impl From<PinionWithFriendRelation> for Pinion {
+    fn from(p: PinionWithFriendRelation) -> Self {
+        Self {
+            id: p.id,
+            user_id: p.user_id,
+            question_id: p.question_id,
+            multi_selection: p.multi_selection,
+            deleted: p.deleted,
+            created: p.created,
+            modified: p.modified,
+        }
+    }
 }
 
 #[Object]
@@ -817,14 +855,32 @@ pub struct FriendPinion {
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
 }
+impl From<Pinion> for FriendPinion {
+    fn from(p: Pinion) -> Self {
+        Self {
+            id: p.id,
+            user_id: p.user_id,
+            question_id: p.question_id,
+            multi_selection: p.multi_selection,
+            deleted: p.deleted,
+            created: p.created,
+            modified: p.modified,
+        }
+    }
+}
 
 #[Object]
 impl FriendPinion {
     async fn id(&self) -> String {
         self.id.to_string()
     }
-    async fn user(&self) -> FriendUser {
-        todo!();
+    async fn user(&self, ctx: &Context<'_>) -> FieldResult<FriendUser> {
+        ctx.data_unchecked::<AppLoader>()
+            .load_one(UserId(self.user_id))
+            .await?
+            .map(FriendUser::from)
+            .ok_or_else(|| AppError::from(format!("unable to load friend user {}", self.user_id)))
+            .extend()
     }
     async fn question_id(&self) -> String {
         self.question_id.to_string()
