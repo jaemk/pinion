@@ -1,5 +1,6 @@
 use crate::models::{
-    Friend, GroupAssociation, Pinion, Profile, Question, QuestionMultiOption, User,
+    Friend, GroupAssociation, Pinion, PinionWithFriendRelation, Profile, Question,
+    QuestionMultiOption, User,
 };
 use crate::AppError;
 use async_graphql::dataloader::{DataLoader, HashMapCache};
@@ -177,6 +178,67 @@ impl async_graphql::dataloader::Loader<FriendsForUserId> for PgLoader {
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
+pub struct PinionsOfFriendsForUserQuestionId(pub i64, pub i64);
+
+#[async_trait::async_trait]
+impl async_graphql::dataloader::Loader<PinionsOfFriendsForUserQuestionId> for PgLoader {
+    type Value = Vec<Pinion>;
+    type Error = std::sync::Arc<AppError>;
+
+    async fn load(
+        &self,
+        keys: &[PinionsOfFriendsForUserQuestionId],
+    ) -> std::result::Result<HashMap<PinionsOfFriendsForUserQuestionId, Self::Value>, Self::Error>
+    {
+        tracing::info!("loading pinions of friends for {} users", keys.len());
+        let query = r##"
+            select p.*, f.requestor_id, f.acceptor_id
+            from pin.pinions p
+                inner join pin.friends f
+                    on p.user_id = f.requestor_id
+                    or p.user_id = f.acceptor_id
+            where
+                 p.question_id in (select * from unnest($1))
+                 or (f.requestor_id in (select * from unnest($2)) or f.acceptor_id in (select * from unnest ($2)))
+                 and p.deleted is false
+                 and f.deleted is false
+        "##;
+        let u_ids = keys.iter().map(|u| u.0).collect::<Vec<_>>();
+        let q_ids = keys.iter().map(|u| u.1).collect::<Vec<_>>();
+        let res: Vec<PinionWithFriendRelation> = sqlx::query_as(query)
+            .bind(&q_ids)
+            .bind(&u_ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AppError::from)?;
+        tracing::info!("loaded {} friend pinions", res.len());
+        let res = res.into_iter().fold(HashMap::new(), |mut acc, p| {
+            {
+                // Need to push both sides because we don't know who is "asking"
+                // When we the dataloader iterators over the input keys, both "sides"
+                // of the friendship will be available to pull.
+                let e = acc
+                    .entry(PinionsOfFriendsForUserQuestionId(
+                        p.requestor_id,
+                        p.question_id,
+                    ))
+                    .or_insert_with(Vec::new);
+                e.push(p.clone().into());
+                let e = acc
+                    .entry(PinionsOfFriendsForUserQuestionId(
+                        p.acceptor_id,
+                        p.question_id,
+                    ))
+                    .or_insert_with(Vec::new);
+                e.push(p.into());
+            }
+            acc
+        });
+        Ok(res)
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct QuestionOfDay;
 
 pub static QOD_QUERY: &str = r##"
@@ -297,122 +359,3 @@ impl async_graphql::dataloader::Loader<PinionForQuestion> for PgLoader {
         Ok(res)
     }
 }
-
-// #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-// pub struct CreatureUserId(pub i64, pub i64);
-//
-// #[async_trait::async_trait]
-// impl async_graphql::dataloader::Loader<CreatureUserId> for PgLoader {
-//     type Value = CreatureRelation;
-//     type Error = std::sync::Arc<AppError>;
-//
-//     async fn load(
-//         &self,
-//         keys: &[CreatureUserId],
-//     ) -> std::result::Result<HashMap<CreatureUserId, Self::Value>, Self::Error> {
-//         tracing::info!("loading {} creatures for users", keys.len());
-//         let query = r##"
-//             select c.*, ca.user_id, ca.kind from poop.creatures c
-//                 inner join poop.creature_access ca on ca.creature_id = c.id
-//             where c.deleted is false
-//                 and ca.deleted is false
-//                 and (
-//                     ca.user_id in (select * from unnest($1))
-//                     or ca.creature_id in (select * from unnest($2))
-//                 )
-//         "##;
-//         let c_ids = keys.iter().map(|c| c.0).collect::<Vec<_>>();
-//         let u_ids = keys.iter().map(|c| c.1).collect::<Vec<_>>();
-//         let res: Vec<CreatureRelation> = sqlx::query_as(query)
-//             .bind(&u_ids)
-//             .bind(&c_ids)
-//             .fetch_all(&self.pool)
-//             .await
-//             .map_err(AppError::from)?;
-//         tracing::info!("loaded {} creatures for users", res.len());
-//         let res = res.into_iter().fold(HashMap::new(), |mut acc, c| {
-//             acc.insert(CreatureUserId(c.id, c.user_id), c);
-//             acc
-//         });
-//         Ok(res)
-//     }
-// }
-//
-// #[derive(Clone, Hash, PartialEq, Eq)]
-// pub struct CreaturesForUserId(pub i64);
-//
-// #[async_trait::async_trait]
-// impl async_graphql::dataloader::Loader<CreaturesForUserId> for PgLoader {
-//     type Value = Vec<CreatureRelation>;
-//     type Error = std::sync::Arc<AppError>;
-//
-//     async fn load(
-//         &self,
-//         keys: &[CreaturesForUserId],
-//     ) -> std::result::Result<HashMap<CreaturesForUserId, Self::Value>, Self::Error> {
-//         tracing::info!("loading {} creatures", keys.len());
-//         let query = r##"
-//             select c.*, ca.user_id, ca.kind from poop.creatures c
-//                 inner join poop.creature_access ca on ca.creature_id = c.id
-//             where ca.user_id in (select * from unnest($1))
-//                 and ca.deleted is false
-//                 and c.deleted is false
-//         "##;
-//         let keys = keys.iter().map(|c| c.0).collect::<Vec<_>>();
-//         let res: Vec<CreatureRelation> = sqlx::query_as(query)
-//             .bind(&keys)
-//             .fetch_all(&self.pool)
-//             .await
-//             .map_err(AppError::from)?;
-//         tracing::info!("loaded {} creatures", res.len());
-//         let res = res.into_iter().fold(HashMap::new(), |mut acc, c| {
-//             {
-//                 let e = acc
-//                     .entry(CreaturesForUserId(c.user_id))
-//                     .or_insert_with(Vec::new);
-//                 e.push(c);
-//             }
-//             acc
-//         });
-//         Ok(res)
-//     }
-// }
-//
-// #[derive(Clone, Hash, PartialEq, Eq)]
-// pub struct PoopsForCreatureId(pub i64);
-//
-// #[async_trait::async_trait]
-// impl async_graphql::dataloader::Loader<PoopsForCreatureId> for PgLoader {
-//     type Value = Vec<Poop>;
-//     type Error = std::sync::Arc<AppError>;
-//
-//     async fn load(
-//         &self,
-//         keys: &[PoopsForCreatureId],
-//     ) -> std::result::Result<HashMap<PoopsForCreatureId, Self::Value>, Self::Error> {
-//         tracing::info!("loading {} poops for creatures", keys.len());
-//         let query = r##"
-//             select p.* from poop.poops p
-//             where p.creature_id in (select * from unnest($1))
-//                 and p.deleted is false
-//                 order by p.created desc
-//         "##;
-//         let keys = keys.iter().map(|c| c.0).collect::<Vec<_>>();
-//         let res: Vec<Poop> = sqlx::query_as(query)
-//             .bind(&keys)
-//             .fetch_all(&self.pool)
-//             .await
-//             .map_err(AppError::from)?;
-//         tracing::info!("loaded {} poops for creatures", res.len());
-//         let res = res.into_iter().fold(HashMap::new(), |mut acc, p| {
-//             {
-//                 let e = acc
-//                     .entry(PoopsForCreatureId(p.creature_id))
-//                     .or_insert_with(Vec::new);
-//                 e.push(p);
-//             }
-//             acc
-//         });
-//         Ok(res)
-//     }
-// }
