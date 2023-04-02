@@ -1,5 +1,5 @@
 use crate::models::{
-    Friend, GroupAssociation, Pinion, PinionWithFriendRelation, Profile, Question,
+    Comment, Friend, GroupAssociation, Pinion, PinionWithFriendRelation, Profile, Question,
     QuestionMultiOption, User,
 };
 use crate::AppError;
@@ -354,6 +354,49 @@ impl async_graphql::dataloader::Loader<PinionForQuestion> for PgLoader {
         tracing::info!("loaded {} pinions", res.len());
         let res = res.into_iter().fold(HashMap::new(), |mut acc, pin| {
             acc.insert(PinionForQuestion(pin.question_id, pin.user_id), pin);
+            acc
+        });
+        Ok(res)
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct CommentsForPinion(pub i64);
+
+#[async_trait::async_trait]
+impl async_graphql::dataloader::Loader<CommentsForPinion> for PgLoader {
+    type Value = Vec<Comment>;
+    type Error = std::sync::Arc<AppError>;
+
+    async fn load(
+        &self,
+        keys: &[CommentsForPinion],
+    ) -> std::result::Result<HashMap<CommentsForPinion, Self::Value>, Self::Error> {
+        tracing::info!("loading comments for {} pinions", keys.len());
+        let query = r##"
+        select * from pin.comments
+            where
+                deleted is false and
+                pinion_id in (select * from unnest($1))
+            order by created asc
+        "##;
+        let p_ids = keys.iter().map(|ga| ga.0).collect::<Vec<_>>();
+        let res: Vec<Comment> = sqlx::query_as(query)
+            .bind(&p_ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("error loading pinions {:?}", e);
+                AppError::from(e)
+            })?;
+        tracing::info!("loaded {} comments", res.len());
+        let res = res.into_iter().fold(HashMap::new(), |mut acc, comment| {
+            {
+                let e = acc
+                    .entry(CommentsForPinion(comment.pinion_id))
+                    .or_insert_with(Vec::new);
+                e.push(comment);
+            }
             acc
         });
         Ok(res)

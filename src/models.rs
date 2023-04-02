@@ -1,7 +1,8 @@
 use crate::error::LogError;
 use crate::loaders::{
-    AppLoader, FriendsForUserId, GroupAssociationsForUserId, MultiOptionsForQuestion,
-    PinionForQuestion, PinionsOfFriendsForUserQuestionId, ProfileForUserId, QuestionOfDay, UserId,
+    AppLoader, CommentsForPinion, FriendsForUserId, GroupAssociationsForUserId,
+    MultiOptionsForQuestion, PinionForQuestion, PinionsOfFriendsForUserQuestionId,
+    ProfileForUserId, QuestionOfDay, UserId,
 };
 use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object, ResultExt};
@@ -864,9 +865,14 @@ impl Pinion {
         todo!()
     }
     /// A list of all comments ordered sequentially from earliest to latest
-    async fn comments(&self) -> FieldResult<Vec<Comment>> {
-        // todo
-        Ok(vec![])
+    async fn comments(&self, ctx: &Context<'_>) -> FieldResult<Vec<Comment>> {
+        ctx.data_unchecked::<AppLoader>()
+            .load_one(CommentsForPinion(self.id))
+            .await?
+            .ok_or_else(|| {
+                AppError::from(format!("unable to load comments for pinion {}", self.id))
+            })
+            .extend()
     }
 }
 
