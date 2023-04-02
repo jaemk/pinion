@@ -748,6 +748,47 @@ impl MutationRoot {
     }
 
     #[graphql(guard = "LoginGuard::new()")]
+    /// Submit a comment for a pinion
+    async fn comment(
+        &self,
+        ctx: &Context<'_>,
+        pinion_id: String,
+        content: String,
+    ) -> FieldResult<bool> {
+        let user = ctx.data_unchecked::<User>();
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let pinion_id = pinion_id.parse::<i64>()?;
+        sqlx::query(
+            r##"
+            insert into pin.comments
+                (pinion_id, user_id, content)
+                values ($1, $2, $3)
+            "##,
+        )
+        .bind(pinion_id)
+        .bind(user.id)
+        .bind(content)
+        .execute(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|_e, ex| {
+            ex.set("key", "DATABASE_ERROR");
+        })?;
+        tr.commit()
+            .await
+            .map_err(AppError::from)
+            .log_error()
+            .extend()?;
+        Ok(true)
+    }
+
+    #[graphql(guard = "LoginGuard::new()")]
     /// Accept a friend request
     async fn accept_fiend(
         &self,

@@ -859,6 +859,15 @@ impl Pinion {
     async fn multi_selection_id(&self) -> String {
         self.multi_selection.to_string()
     }
+    /// The user who submitted this pinion
+    async fn user(&self) -> FieldResult<User> {
+        todo!()
+    }
+    /// A list of all comments ordered sequentially from earliest to latest
+    async fn comments(&self) -> FieldResult<Vec<Comment>> {
+        // todo
+        Ok(vec![])
+    }
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -903,5 +912,34 @@ impl FriendPinion {
     }
     async fn multi_selection_id(&self) -> String {
         self.multi_selection.to_string()
+    }
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub struct Comment {
+    pub id: i64,
+    pub pinion_id: i64,
+    pub user_id: i64,
+    pub content: String,
+    pub deleted: bool,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+}
+
+#[Object]
+impl Comment {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+    /// The parent pinion this comment was made on
+    async fn pinion(&self) -> FieldResult<Pinion> {
+        todo!()
+    }
+    /// The user that made this comment
+    async fn user(&self) -> FieldResult<User> {
+        todo!()
+    }
+    async fn content(&self) -> &str {
+        &self.content
     }
 }
