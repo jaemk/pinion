@@ -1,7 +1,8 @@
 use crate::crypto::{b64_encode, encrypt};
 use crate::loaders::{AppLoader, QuestionOfDay};
 use crate::models::{
-    BaseUser, ChallengePhone, Friend, LoginSuccess, Phone, Pinion, Question, User, VerificationCode,
+    BaseUser, ChallengePhone, Friend, LoginSuccess, Phone, PhoneCheck, Pinion, Question, User,
+    VerificationCode,
 };
 use crate::{error::LogError, AppError, Result, CONFIG};
 use async_graphql::{
@@ -882,6 +883,39 @@ impl MutationRoot {
             .log_error()
             .extend()?;
         Ok(f)
+    }
+    #[graphql(guard = "LoginGuard::new()")]
+    /// Check if phone numbers are associated with signed up users
+    async fn check_phones(
+        &self,
+        ctx: &Context<'_>,
+        phone_numbers: Vec<String>,
+    ) -> FieldResult<Vec<PhoneCheck>> {
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let checks: Vec<PhoneCheck> = sqlx::query_as(
+            r#"
+            select in_num, p.number is not null
+            from unnest($1) as in_num
+            left outer join pin.phones p on p.number = in_num and p.deleted is false;
+            "#,
+        )
+        .bind(&phone_numbers)
+        .fetch_all(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend()?;
+        tr.commit()
+            .await
+            .map_err(AppError::from)
+            .log_error()
+            .extend()?;
+        Ok(checks)
     }
 }
 

@@ -318,6 +318,22 @@ impl Phone {
     }
 }
 
+#[derive(Clone, sqlx::FromRow)]
+pub struct PhoneCheck {
+    pub number: String,
+    pub signed_up: bool,
+}
+
+#[Object]
+impl PhoneCheck {
+    async fn number(&self) -> &str {
+        &self.number
+    }
+    async fn signed_up(&self) -> bool {
+        self.signed_up
+    }
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Friend {
     pub id: i64,
