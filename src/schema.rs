@@ -950,6 +950,7 @@ impl MutationRoot {
         .fetch_all(&mut *tr)
         .await
         .map_err(AppError::from)
+        .log_error_msg(|| "failed querying for phones")
         .extend()?;
         tr.commit()
             .await
