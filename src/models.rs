@@ -319,6 +319,11 @@ impl Phone {
     }
 }
 
+#[derive(Clone, Hash, Eq, PartialEq, sqlx::FromRow)]
+pub struct PhoneCheckRaw {
+    pub number: String,
+}
+
 #[derive(Clone, sqlx::FromRow)]
 pub struct PhoneCheck {
     pub number: String,
