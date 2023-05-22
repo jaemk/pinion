@@ -57,6 +57,45 @@ impl async_graphql::dataloader::Loader<UserId> for PgLoader {
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
+pub struct UserForPhone(pub String);
+
+#[async_trait::async_trait]
+impl async_graphql::dataloader::Loader<UserForPhone> for PgLoader {
+    type Value = User;
+    type Error = std::sync::Arc<AppError>;
+
+    async fn load(
+        &self,
+        keys: &[UserForPhone],
+    ) -> std::result::Result<HashMap<UserForPhone, Self::Value>, Self::Error> {
+        tracing::info!("loading {} users", keys.len());
+        let query = r##"
+            select u.*, p.number as phone_number, p.verified as phone_verified,
+            p.verification_sent as phone_verification_sent,
+            p.verification_attempts as phone_verification_attempts
+            from pin.users u
+                inner join pin.phones p on p.user_id = u.id
+            where p.number in (select * from unnest($1))
+        "##;
+        let numbers = keys.iter().map(|c| c.0.clone()).collect::<Vec<_>>();
+        let res: Vec<User> = sqlx::query_as(query)
+            .bind(&numbers)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("error loading users by phone: {:?}", e);
+                AppError::from(e)
+            })?;
+        tracing::info!("loaded {} users", res.len());
+        let res = res.into_iter().fold(HashMap::new(), |mut acc, u| {
+            acc.insert(UserForPhone(u.phone_number.clone()), u);
+            acc
+        });
+        Ok(res)
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct ProfileForUserId(pub i64);
 
 #[async_trait::async_trait]
