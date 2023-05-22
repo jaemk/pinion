@@ -1,8 +1,8 @@
 use crate::crypto::{b64_encode, encrypt};
 use crate::loaders::{AppLoader, QuestionOfDay};
 use crate::models::{
-    BaseUser, ChallengePhone, Friend, LoginSuccess, Phone, PhoneCheck, PhoneCheckRaw, Pinion,
-    Question, User, VerificationCode,
+    BaseUser, ChallengePhone, Friend, LoginSuccess, Phone, PhoneCheck, Pinion, Question, User,
+    VerificationCode,
 };
 use crate::{error::LogError, AppError, Result, CONFIG};
 use async_graphql::{
@@ -11,7 +11,6 @@ use async_graphql::{
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::PgPool;
-use std::collections::HashSet;
 
 struct LoginGuard;
 
@@ -940,11 +939,11 @@ impl MutationRoot {
             .map_err(AppError::from)
             .log_error_msg(|| "error starting transaction")
             .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
-        let checks: Vec<PhoneCheckRaw> = sqlx::query_as(
+        let checks: Vec<PhoneCheck> = sqlx::query_as(
             r#"
-            select in_num
+            select in_num as number, p.number is not null as signed_up
             from unnest($1) as in_num
-            inner join pin.phones p on p.number = in_num and p.deleted is false;
+            left outer join pin.phones p on p.number = in_num and p.deleted is false;
             "#,
         )
         .bind(&phone_numbers)
@@ -958,19 +957,6 @@ impl MutationRoot {
             .map_err(AppError::from)
             .log_error()
             .extend()?;
-        let exists = checks.iter().collect::<HashSet<_>>();
-        let checks = phone_numbers
-            .iter()
-            .map(|num| {
-                let raw = PhoneCheckRaw {
-                    number: num.to_string(),
-                };
-                PhoneCheck {
-                    number: num.to_string(),
-                    signed_up: exists.get(&raw).is_some(),
-                }
-            })
-            .collect::<Vec<_>>();
         Ok(checks)
     }
 }
