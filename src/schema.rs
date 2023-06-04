@@ -1,8 +1,8 @@
 use crate::crypto::{b64_encode, encrypt};
 use crate::loaders::{AppLoader, QuestionOfDay};
 use crate::models::{
-    BaseUser, ChallengePhone, Friend, LoginSuccess, Phone, PhoneCheck, Pinion, Question, User,
-    VerificationCode,
+    BaseUser, ChallengePhone, Friend, LoginSuccess, Phone, PhoneCheck, Pinion, PotentialFriendUser,
+    Question, User, VerificationCode,
 };
 use crate::{error::LogError, AppError, Result, CONFIG};
 use async_graphql::{
@@ -876,6 +876,55 @@ impl MutationRoot {
     }
 
     #[graphql(guard = "LoginGuard::new()")]
+    /// Request a friendship by other user's ID
+    async fn request_friend_id(&self, ctx: &Context<'_>, user_id: String) -> FieldResult<Friend> {
+        let user = ctx.data_unchecked::<User>();
+        let pool = ctx.data_unchecked::<PgPool>();
+        let other_user_id = user_id.parse::<i64>()?;
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let other_user = User::fetch_user(&mut tr, other_user_id)
+            .await
+            .log_error_msg(|| "unable to load other user")?;
+        let f: Friend = sqlx::query_as(
+            r#"
+            insert into pin.friends
+                (requestor_id, acceptor_id)
+                values ($1, $2)
+                returning *
+            "#,
+        )
+        .bind(user.id)
+        .bind(other_user_id)
+        .fetch_one(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .extend_err(|e, ex| {
+            if let Some((_code, _constraint)) = e.unique_constraint_error() {
+                tracing::info!(
+                    "{}:{} friend relationship already exists",
+                    &user.handle,
+                    &other_user.handle
+                );
+                ex.set("key", "DUPLICATE_FRIEND_REQUEST");
+            } else {
+                tracing::error!("error creating friend relationship {:?}", e);
+                ex.set("key", "DATABASE_ERROR");
+            }
+        })?;
+        tr.commit()
+            .await
+            .map_err(AppError::from)
+            .log_error()
+            .extend()?;
+        Ok(f)
+    }
+
+    #[graphql(guard = "LoginGuard::new()")]
     /// Terminate a friendship
     async fn delete_fiend(
         &self,
@@ -981,6 +1030,59 @@ impl QueryRoot {
             .await?
             .unwrap();
         Ok(r)
+    }
+
+    #[graphql(guard = "LoginGuard::new()")]
+    /// Search for users to find new friends
+    async fn search_users(
+        &self,
+        ctx: &Context<'_>,
+        handle_or_name: String,
+    ) -> FieldResult<Vec<PotentialFriendUser>> {
+        let u = ctx.data_unchecked::<User>();
+        let pool = ctx.data_unchecked::<PgPool>();
+        let mut tr = pool
+            .begin()
+            .await
+            .map_err(AppError::from)
+            .log_error_msg(|| "error starting transaction")
+            .extend_err(|_e, ex| ex.set("key", "DATABASE_ERROR"))?;
+        let handle_or_name = format!("%{handle_or_name}%");
+        let pot_friends: Vec<PotentialFriendUser> = sqlx::query_as(
+            r#"
+            select u.id, u.handle,
+            exists(select f.* from pin.friends f where
+                accepted is not null
+                and deleted is false
+                and (
+                    (acceptor_id = $1 and requestor_id = u.id)
+                    or
+                    (acceptor_id = u.id and requestor_id = $1)
+                )
+            ) as is_friend
+            from pin.users u
+            inner join pin.profiles pr on pr.user_id = u.id
+            where u.deleted is false
+                and (
+                    u.handle ilike $2
+                    or
+                    pr.name ilike $2
+                )
+            "#,
+        )
+        .bind(u.id)
+        .bind(&handle_or_name)
+        .fetch_all(&mut *tr)
+        .await
+        .map_err(AppError::from)
+        .log_error_msg(|| "failed querying for potential friend users")
+        .extend()?;
+        tr.commit()
+            .await
+            .map_err(AppError::from)
+            .log_error()
+            .extend()?;
+        Ok(pot_friends)
     }
 }
 

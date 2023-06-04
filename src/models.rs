@@ -2,7 +2,7 @@ use crate::error::LogError;
 use crate::loaders::{
     AppLoader, CommentsForPinion, FriendsForUserId, GroupAssociationsForUserId,
     MultiOptionsForQuestion, PinionForQuestion, PinionsOfFriendsForUserQuestionId,
-    ProfileForUserId, QuestionOfDay, UserId,
+    ProfileForUserId, QuestionOfDay, UserForPhone, UserId,
 };
 use crate::{AppError, Result};
 use async_graphql::{Context, ErrorExtensions, FieldResult, Object, ResultExt};
@@ -249,6 +249,47 @@ impl FriendUser {
 }
 
 #[derive(Clone, sqlx::FromRow)]
+pub struct PotentialFriendUser {
+    pub id: i64,
+    pub handle: String,
+    pub is_friend: bool,
+}
+
+impl From<User> for PotentialFriendUser {
+    fn from(u: User) -> Self {
+        Self {
+            id: u.id,
+            handle: u.handle,
+            // default
+            is_friend: false,
+        }
+    }
+}
+
+#[Object]
+impl PotentialFriendUser {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    /// The user's human name
+    async fn profile(&self, ctx: &Context<'_>) -> FieldResult<Option<Profile>> {
+        let u = ctx.data_opt::<User>().expect("no current user");
+        let p = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(ProfileForUserId(u.id))
+            .await?;
+        Ok(p)
+    }
+    async fn handle(&self) -> &str {
+        &self.handle
+    }
+    async fn is_friend(&self) -> bool {
+        self.is_friend
+    }
+}
+
+#[derive(Clone, sqlx::FromRow)]
 pub struct Profile {
     pub id: i64,
     pub user_id: i64,
@@ -332,6 +373,15 @@ impl PhoneCheck {
     }
     async fn signed_up(&self) -> bool {
         self.signed_up
+    }
+    async fn user(&self, ctx: &Context<'_>) -> FieldResult<PotentialFriendUser> {
+        let r = ctx
+            .data_unchecked::<AppLoader>()
+            .load_one(UserForPhone(self.number.clone()))
+            .await?
+            .ok_or_else(|| AppError::E(format!("missing user for phone {}", self.number)).extend())?
+            .into();
+        Ok(r)
     }
 }
 
